@@ -83,6 +83,24 @@ TEST_CASE("paths contain no character the director would mangle") {
     }
 }
 
+TEST_CASE("the no-tree sentinel round-trips to an empty tree name") {
+    const std::string path = fdp::BuildTdiPath(kPrefix, "", 0, OneExpr("[1.0,2.0,3.0]"));
+    CHECK(path.find(std::string("/") + fdp::kNoTree + "/") != std::string::npos);
+
+    fdp::TdiTarget t;
+    REQUIRE(fdp::ParseTdiPath(path, kPrefix, t));
+    CHECK(t.tree.empty());
+    CHECK(t.shot == 0);
+    CHECK(t.request.items[0].exp == "[1.0,2.0,3.0]");
+}
+
+TEST_CASE("a real tree name is not confused with the sentinel") {
+    fdp::TdiTarget t;
+    REQUIRE(fdp::ParseTdiPath(
+        fdp::BuildTdiPath(kPrefix, "efit01", 190000, OneExpr("\\ipmhd")), kPrefix, t));
+    CHECK(t.tree == "efit01");
+}
+
 TEST_CASE("builds the documented bucket layout") {
     CHECK(fdp::ShotBucket(190000) == "00/00/19/00");
     CHECK(fdp::ShotBucket(121844) == "00/00/12/18");

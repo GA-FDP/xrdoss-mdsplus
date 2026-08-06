@@ -8,11 +8,18 @@
 namespace fdp {
 
 // A fully decoded intercepted path: which tree and shot, and what to evaluate.
+// An empty `tree` means "evaluate without opening a tree".
 struct TdiTarget {
     std::string tree;
     long long   shot = 0;
     Request     request;
 };
+
+// The path grammar always carries a tree segment, but some expressions need no
+// tree open at all — pure computation, or functions like PTDATA2 that take the
+// shot as an argument. This sentinel is the segment that denotes that case; it
+// is not a legal MDSplus tree name, so it cannot collide with a real one.
+extern const char *const kNoTree;   // "-"
 
 // "00/00/19/00" for shot 190000 — sprintf("%08lld", shot/100) in digit pairs.
 // Mirrors the existing MDSplus archive layout so leaf directories hold ~100

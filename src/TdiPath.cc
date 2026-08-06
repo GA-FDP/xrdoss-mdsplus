@@ -31,6 +31,8 @@ bool AllDigits(const std::string &s) {
 
 namespace fdp {
 
+const char *const kNoTree = "-";
+
 std::string ShotBucket(long long shot) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%08lld", shot / 100);
@@ -78,7 +80,9 @@ bool ParseTdiPath(const std::string &lfn, const std::string &prefix, TdiTarget &
     Request req;
     if (!Request::Parse(raw, req)) return false;
 
-    out.tree = p[0];
+    // The sentinel maps to an empty tree name, which the evaluator reads as
+    // "evaluate without opening a tree".
+    out.tree = (p[0] == kNoTree) ? std::string() : p[0];
     out.shot = shot;
     out.request = req;
     return true;
@@ -90,7 +94,8 @@ std::string BuildTdiPath(const std::string &prefix, const std::string &tree,
     char shotbuf[32];
     std::snprintf(shotbuf, sizeof(shotbuf), "%lld", shot);
 
-    std::string path = prefix + "/" + tree + "/" + ShotBucket(shot) + "/" + shotbuf;
+    const std::string tree_seg = tree.empty() ? std::string(kNoTree) : tree;
+    std::string path = prefix + "/" + tree_seg + "/" + ShotBucket(shot) + "/" + shotbuf;
     for (size_t i = 0; i < enc.size(); i += kMaxSegment) {
         path += "/" + enc.substr(i, kMaxSegment);
     }

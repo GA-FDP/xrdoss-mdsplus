@@ -147,6 +147,36 @@ which would be `/` in standard base64 and would have split the segment — and t
 object's bytes came back. Prefix, digit-pair bucketing, shot number and chunk
 all round-trip.
 
+## Task 8 addendum — end-to-end through the federation, and the no-tree sentinel
+
+The plugin receives the LFN **exactly as the federation path**, with no
+`oss.localroot` prefix applied:
+
+```
+ossmdsplus_Open: /tdi/-/00/00/00/00/0/AQABAAJyMAAAAA1bMS4wLDIuMCwzLjBdAA
+```
+
+So `prefix=/tdi` needs no adjustment — the discovery step contemplated in Tasks
+9 and 10 is resolved.
+
+A full fetch works: director -> origin -> XRootD -> Oss plugin -> unix socket ->
+MDSplus evaluator -> serialized descriptor.
+
+```
+HTTP 200, 99 bytes  ->  r0 = [1. 2. 3.]
+```
+
+A three-item batch also works, with a deliberately broken expression returned as
+an in-band error while the response stays 200. Pass-through is unaffected.
+
+**Gap found by running it.** The path grammar always carries a tree segment, so
+there was no way to express "evaluate without opening a tree" — and `/tdi/none/`
+means a tree literally named `none`, which fails with
+`%TREE-E-NOCURRENT, No current shot number set for this tree`. Treeless
+evaluation is legitimate in production (pure computation, or `PTDATA2` which
+takes the shot as an argument), so `-` is now a reserved tree segment meaning
+"no tree open". It is not a legal MDSplus tree name, so it cannot collide.
+
 ## Reproduce
 
 ```bash
