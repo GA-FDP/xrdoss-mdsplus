@@ -99,6 +99,38 @@ splits at the first `?`. Path identical in both cases. Spec §4.2 confirmed.
 5. `ofs.authorize 1` and `ofs.authlib ++ libXrdAccSciTokens.so` are active even
    with `EnablePublicReads: true`.
 
+## Task 1 addendum — ABI probe result
+
+A conda-built plugin **loads cleanly into the image's XRootD**. The derived-image
+fallback contemplated in the plan is not needed.
+
+```
+Plugin loaded XrdOssMdsplus v5.9.2 from osslib /plugins/libXrdOssMdsplus-5.so
+++++++ XrdOssMdsplus scaffold loaded (pass-through only)
+```
+
+Both environments are XRootD v5.9.2, which is why this works — worth re-checking
+if either side ever moves.
+
+The naming convention from correction 3 above is confirmed in both directions:
+
+| Config says | XRootD loads | Warning |
+|---|---|---|
+| `/plugins/libXrdOssMdsplus.so` (unsuffixed) | `/plugins/libXrdOssMdsplus-5.so` | **none** |
+| `/usr/lib64/libXrdOssStats-5.so` (suffixed) | same file, via fallback | yes, `should not use '-5' version syntax` |
+
+Resulting stack, with pass-through verified working:
+
+```
+ofs.osslib default
+ofs.osslib ++ libXrdOssStats.so
+ofs.osslib ++ /plugins/libXrdOssMdsplus.so
+```
+
+MDSplus `serialize()` / `deserialize()` also round-trips in this pixi
+environment, including the `{name: {value|error}}` dictionary shape the
+evaluator will return, so Task 4's core mechanism is confirmed available here.
+
 ## Reproduce
 
 ```bash

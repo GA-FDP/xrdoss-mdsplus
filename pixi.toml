@@ -1,0 +1,26 @@
+[workspace]
+name = "xrdoss-mdsplus"
+channels = ["ga-fdp", "conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+cmake = "*"
+make = "*"
+pkg-config = "*"
+cxx-compiler = "*"
+# Pinned <6 to match the deployed v5 plugin chain, same rationale as libfdpio2.
+# The Pelican origin image ships XRootD v5.9.2; keeping this pin means the
+# plugin is built against the same ABI it will be loaded into.
+xrootd = "<6"
+doctest = "*"
+python = "3.11.*"
+numpy = "*"
+mdsplus = "*"
+pytest = "*"
+
+[tasks]
+configure = "cmake -S . -B build -DCMAKE_PREFIX_PATH=$CONDA_PREFIX"
+build = { cmd = "cmake --build build -j", depends-on = ["configure"] }
+test = { cmd = "cd build && ctest --output-on-failure", depends-on = ["build"] }
+pytest = "python -m pytest tests -v"
+clean = "rm -rf build"
