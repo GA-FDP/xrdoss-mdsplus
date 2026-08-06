@@ -25,6 +25,7 @@ message(STATUS "XRootD libs:     ${XROOTD_LIB_DIR}")
 
 add_library(core OBJECT
     src/Base64Url.cc
+    src/Request.cc
     src/TdiPath.cc
     src/EvalClient.cc
     src/ResultCache.cc
@@ -60,7 +61,7 @@ if(BUILD_TESTS)
         message(FATAL_ERROR "doctest not found; add doctest to pixi.toml dependencies")
     endif()
 
-    foreach(t base64url tdipath evalclient resultcache)
+    foreach(t base64url request tdipath evalclient resultcache)
         add_executable(test_${t} tests/test_${t}.cpp $<TARGET_OBJECTS:core>)
         target_include_directories(test_${t} PRIVATE src ${XROOTD_INCLUDE_DIR} ${DOCTEST_INCLUDE_DIR})
         target_link_libraries(test_${t} pthread)
