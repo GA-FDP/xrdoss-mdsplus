@@ -122,10 +122,22 @@ def evaluate(tree_name, shot, items):
             try:
                 args = tuple(
                     Data.deserialize(np.frombuffer(a, dtype=np.int8)) for a in raw_args)
+                # Wrap in data() exactly as MDSplus's own GetMany does locally
+                # (connection.py:392). This is not cosmetic: an unwrapped node
+                # evaluates to a descriptor that still REFERENCES tree nodes --
+                # \ipmhd yields Build_Signal(..., *, \ATIME) -- and such a
+                # payload cannot be deserialized by a client with no tree open,
+                # which is every client of this service. data() forces
+                # evaluation to literal values.
+                #
+                # The cost is that dimensions and units do not travel with the
+                # value; callers who want the time base add an explicit
+                # dim_of() item, which batching makes nearly free.
+                wrapped = "data(" + exp + ")"
                 if tree is not None:
-                    value = tree.tdiExecute(exp, args) if args else tree.tdiExecute(exp)
+                    value = tree.tdiExecute(wrapped, args) if args else tree.tdiExecute(wrapped)
                 else:
-                    value = Data.execute(exp, args) if args else Data.execute(exp)
+                    value = Data.execute(wrapped, args) if args else Data.execute(wrapped)
                 result[name] = apd.Dictionary({"value": Data(value)})
             except Exception as exc:                      # per-expression, in band
                 result[name] = apd.Dictionary({"error": str(exc)})

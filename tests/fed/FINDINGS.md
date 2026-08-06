@@ -193,6 +193,45 @@ set rather than three hand-written encoders.
 With chunking fixed, a 120-element expression occupying **5 path chunks** was
 reassembled correctly through the director.
 
+## Task 11 addendum — serialized descriptors are not self-contained
+
+The first test against a real tree failed on decode:
+
+```
+MDSplus.mdsExceptions.TreeNOT_OPEN: %TREE-W-NOT_OPEN, Tree not currently open
+```
+
+`\ipmhd` does not evaluate to literal data. It evaluates to a descriptor that
+still **references tree nodes**:
+
+```
+Build_Signal(Build_With_Units([358837.,408932.,...], "A"), *, \ATIME)
+```
+
+The values are literal but the time base is the node reference `\ATIME`.
+Deserializing that requires the originating tree to be open in the *client*
+process — which is never true for a client of this service.
+
+| Form | Deserializes with no tree open? |
+|---|---|
+| `\ipmhd` | **no** — resolves `\ATIME` |
+| `data(\ipmhd)` | yes |
+| `make_signal(data(x),*,dim_of(x))` | **no** — `dim_of` is itself a node ref |
+
+**Fix, and it is precedent rather than invention:** MDSplus's own `GetMany`
+wraps every expression in `data(...)` when evaluating locally
+(`connection.py:392`). The evaluator now does the same, which both fixes decode
+and makes our semantics byte-identical to what `GetMany` callers already get.
+
+Consequence: **dimensions and units do not ride along with a value.** The spec
+previously claimed a serialized `Signal` would carry them in one object; that
+claim was wrong and §6 is corrected. Callers wanting a time base add an explicit
+`dim_of()` item, which batching makes nearly free.
+
+With the wrap in place, `\ipmhd`, `\q95` and `\psirz` (4,326,400 bytes) all
+match a direct MDSplus read exactly in shape, dtype and values, and
+`dim_of(\ipmhd)` returns the real time base of 256 points over 100–5320 ms.
+
 ## Reproduce
 
 ```bash
