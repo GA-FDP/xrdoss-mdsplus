@@ -1,0 +1,28 @@
+# Minimal public federation for local integration testing. No OIDC, no real
+# certificates, no SciTokens: Pelican auto-generates a dev CA and host cert,
+# and PublicReads removes the need for tokens on the read path.
+#
+# NOTE: TLSSkipVerify is top-level. Server.TLSSkipVerify does not exist.
+TLSSkipVerify: true
+
+Server:
+  EnableUI: false
+
+Origin:
+  StorageType: posix
+  EnablePublicReads: true
+  EnableDirectReads: true
+  Exports:
+    - FederationPrefix: /test
+      StoragePrefix: /data
+      Capabilities: ["PublicReads", "Reads", "DirectReads"]
+    # The virtual-file namespace. StoragePrefix is nominal — the plugin
+    # intercepts before the filesystem is consulted — but the directory must
+    # exist or the origin refuses to export it. Listings is deliberately
+    # omitted: this namespace is synthetic and unbounded (spec 7.5).
+    - FederationPrefix: /tdi
+      StoragePrefix: /data/tdi
+      Capabilities: ["PublicReads", "Reads", "DirectReads"]
+
+Xrootd:
+  ConfigFile: /etc/pelican/xrootd-extra.cfg
