@@ -177,6 +177,22 @@ evaluation is legitimate in production (pure computation, or `PTDATA2` which
 takes the shot as an argument), so `-` is now a reserved tree segment meaning
 "no tree open". It is not a legal MDSplus tree name, so it cannot collide.
 
+## Task 10 addendum — chunking must agree across languages
+
+The federation test initially failed its multi-chunk case with `malformed tdi
+path`. The plugin was right: the test's own Python path builder emitted the
+whole ~840-character base64 as **one** segment, while the C++ `BuildTdiPath`
+chunks at 249. The parser rejected the over-long segment, as it should — such a
+segment also exceeds `NAME_MAX` and could never be materialised by a cache.
+
+Same class of problem as the base64url alphabet: **any second implementation of
+the path grammar has to agree with the first, or requests silently fail.** The
+client transport in Part 4 will be a third. Worth a shared conformance vector
+set rather than three hand-written encoders.
+
+With chunking fixed, a 120-element expression occupying **5 path chunks** was
+reassembled correctly through the director.
+
 ## Reproduce
 
 ```bash
