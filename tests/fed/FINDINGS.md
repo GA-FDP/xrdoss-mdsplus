@@ -131,6 +131,22 @@ MDSplus `serialize()` / `deserialize()` also round-trips in this pixi
 environment, including the `{name: {value|error}}` dictionary shape the
 evaluator will return, so Task 4's core mechanism is confirmed available here.
 
+## Task 4 addendum — the generated grammar survives the director
+
+Task 0 proved a *synthetic* 240-char base64url segment survives. Task 4 repeated
+it with a path actually produced by `BuildTdiPath`, for a deliberately awkward
+two-item request (backslashes, parentheses, a comma inside quotes, a space,
+arithmetic, and a binary argument containing NUL and 0xFF):
+
+```
+/tdi/efit01/00/00/19/00/190000/AQACAAJpcAAAAC5cdG9wLnJlc3VsdHMuYWVxZHNrOnE5NSAq...AwD_AQ
+```
+
+The director returned the 126-character final segment verbatim — note the `_`,
+which would be `/` in standard base64 and would have split the segment — and the
+object's bytes came back. Prefix, digit-pair bucketing, shot number and chunk
+all round-trip.
+
 ## Reproduce
 
 ```bash
