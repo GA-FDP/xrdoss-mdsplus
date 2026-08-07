@@ -169,7 +169,8 @@ This repo currently implements the origin side only. Still to come, in order:
 
 | Piece | Status |
 |---|---|
-| Sandboxing the evaluator | **not built** — TDI can `spawn()`, so this is required before any exposure |
+| Sandboxing mdsip | **not built** — TDI can `spawn()`, so this is required before any exposure |
+| An origin image carrying the MDSplus runtime | **not built** — the plugin links `MdsIpShr`, which the stock Pelican image lacks |
 | Version segment in the path | **not built** — without it a re-analysed shot is served stale forever, because XrdPfc never revalidates |
 | `libMdsIpFDP.so` client transport | not built — lets stock `MDSplus.Connection` use this by changing only its connection string |
 
@@ -180,8 +181,7 @@ deploy.
 
 | Path | What |
 |---|---|
-| `src/` | The plugin. Logic lives in small units (`Base64Url`, `Request`, `TdiPath`, `EvalClient`, `ResultCache`); `OssMdsplus.cc` is thin wiring over them. |
-| `evaluator/` | Python daemon that evaluates TDI and returns serialized MDSplus descriptors over a unix socket. Keeps MDSplus out of the XRootD process. |
+| `src/` | The plugin. Logic lives in small units (`Base64Url`, `TdiPath`, `MdsIpClient`, `ResultCache`); `OssMdsplus.cc` is thin wiring over them. |
 | `tests/` | doctest unit tests, pytest for the evaluator |
 | `tests/fed/` | Local Pelican federation in podman — see `tests/fed/FINDINGS.md` |
 | `tests/integration/` | Standalone XRootD end-to-end |

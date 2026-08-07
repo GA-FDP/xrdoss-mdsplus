@@ -28,7 +28,7 @@ WORK=${REAL_WORK:-/tmp/fdp-real}
 PORT=${REAL_PORT:-10941}
 PLUGIN="$ROOT/build/libXrdOssMdsplus.so"          # unsuffixed on purpose
 PLUGIN_FILE="$ROOT/build/libXrdOssMdsplus-5.so"
-SOCKET="$WORK/evald.sock"
+MDSIP_PORT=${REAL_MDSIP_PORT:-8101}
 EXPORT_DIR="$WORK/export"
 CFG="$WORK/xrootd.cfg"
 
@@ -43,22 +43,22 @@ rm -rf "$WORK"
 mkdir -p "$WORK/admin" "$WORK/run" "$EXPORT_DIR/tdi" "$EXPORT_DIR/plain"
 echo hello > "$EXPORT_DIR/plain/hello.txt"
 
-sed -e "s#@@PLUGIN@@#$PLUGIN#" -e "s#@@SOCKET@@#$SOCKET#" \
+sed -e "s#@@PLUGIN@@#$PLUGIN#" -e "s#@@MDSIP@@#localhost:$MDSIP_PORT#" \
     -e "s#@@EXPORT@@#$EXPORT_DIR#" -e "s#@@PORT@@#$PORT#" -e "s#@@WORK@@#$WORK#" \
     "$ROOT/tests/integration/xrootd-test.cfg" > "$CFG"
 
-EVAL_PID=""; XRD_PID=""
+MDSIP_PID=""; XRD_PID=""
 cleanup() {
-  [ -n "$XRD_PID"  ] && kill "$XRD_PID"  2>/dev/null || true
-  [ -n "$EVAL_PID" ] && kill "$EVAL_PID" 2>/dev/null || true
+  [ -n "$XRD_PID"   ] && kill "$XRD_PID"   2>/dev/null || true
+  [ -n "$MDSIP_PID" ] && kill "$MDSIP_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+# shellcheck source=../mdsip_helper.sh
+. "$ROOT/tests/mdsip_helper.sh"
 fail() { echo "FAIL: $1"; tail -20 "$WORK/xrootd.log" 2>/dev/null; exit 1; }
 
-python "$ROOT/evaluator/fdp_mdsplus_evald.py" --socket "$SOCKET" & EVAL_PID=$!
-disown "$EVAL_PID" 2>/dev/null || true
-for _ in $(seq 1 100); do [ -S "$SOCKET" ] && break; sleep 0.1; done
-[ -S "$SOCKET" ] || fail "evaluator socket never appeared"
+start_mdsip "$MDSIP_PORT" "$TREES" "$WORK"
 
 xrootd -c "$CFG" -l "$WORK/xrootd.log" >/dev/null 2>&1 & XRD_PID=$!
 disown "$XRD_PID" 2>/dev/null || true
@@ -70,22 +70,7 @@ for _ in $(seq 1 150); do
 done
 
 # Build a path naming a real tree and shot.
-mkpath() {
-  python - "$TREE" "$SHOT" "$@" <<'PY'
-import base64, struct, sys
-MAX_SEGMENT = 249       # keep in sync with fdp::kMaxSegment
-tree, shot = sys.argv[1], int(sys.argv[2])
-items = [(a.split('=', 1)[0].encode(), a.split('=', 1)[1].encode()) for a in sys.argv[3:]]
-c = struct.pack('>BH', 1, len(items))
-for n, e in items:
-    c += struct.pack('>H', len(n)) + n + struct.pack('>I', len(e)) + e + struct.pack('>B', 0)
-enc = base64.urlsafe_b64encode(c).decode().rstrip('=')
-chunks = [enc[i:i + MAX_SEGMENT] for i in range(0, len(enc), MAX_SEGMENT)]
-bucket = '%08d' % (shot // 100)
-bucket = '/'.join(bucket[i:i+2] for i in range(0, 8, 2))
-print('/tdi/%s/%s/%d/%s' % (tree, bucket, shot, '/'.join(chunks)))
-PY
-}
+mkpath() { python "$ROOT/tests/mkpath.py" "$TREE" "$SHOT" "$@"; }
 
 echo "=== comparing against a direct MDSplus read ==="
 for NODE in '\ipmhd' '\q95' '\psirz'; do

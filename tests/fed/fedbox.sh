@@ -24,8 +24,10 @@ case "${1:-}" in
   *) echo "usage: $0 {start|stop} [extra-xrootd.cfg] [plugin.so]"; exit 2 ;;
 esac
 
-EXTRA_CFG="${2:-}"
-PLUGIN_SO="${3:-}"
+# podman reads a relative bind-mount source as a *volume name*, so make these
+# absolute or the failure is an inscrutable "names must match" error.
+EXTRA_CFG="${2:-}"; [ -n "$EXTRA_CFG" ] && EXTRA_CFG="$(readlink -f "$EXTRA_CFG")"
+PLUGIN_SO="${3:-}"; [ -n "$PLUGIN_SO" ] && PLUGIN_SO="$(readlink -f "$PLUGIN_SO")"
 
 podman rm -f "$NAME" >/dev/null 2>&1 || true
 mkdir -p "$DATA/tdi"    # nominal StoragePrefix for the virtual-file export

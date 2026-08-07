@@ -76,21 +76,19 @@ bool ParseTdiPath(const std::string &lfn, const std::string &prefix, TdiTarget &
 
     std::string raw;
     if (!Base64UrlDecode(encoded, raw)) return false;
+    if (raw.empty()) return false;
 
-    Request req;
-    if (!Request::Parse(raw, req)) return false;
-
-    // The sentinel maps to an empty tree name, which the evaluator reads as
-    // "evaluate without opening a tree".
+    // The sentinel maps to an empty tree name, meaning "evaluate without
+    // opening a tree".
     out.tree = (p[0] == kNoTree) ? std::string() : p[0];
     out.shot = shot;
-    out.request = req;
+    out.payload.swap(raw);
     return true;
 }
 
 std::string BuildTdiPath(const std::string &prefix, const std::string &tree,
-                         long long shot, const Request &request) {
-    const std::string enc = Base64UrlEncode(request.Serialize());
+                         long long shot, const std::string &payload) {
+    const std::string enc = Base64UrlEncode(payload);
     char shotbuf[32];
     std::snprintf(shotbuf, sizeof(shotbuf), "%lld", shot);
 

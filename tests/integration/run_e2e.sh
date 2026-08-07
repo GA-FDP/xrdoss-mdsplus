@@ -12,7 +12,7 @@ WORK=${E2E_WORK:-/tmp/fdp-e2e}
 PORT=${E2E_PORT:-10940}
 PLUGIN="$ROOT/build/libXrdOssMdsplus.so"        # unsuffixed on purpose
 PLUGIN_FILE="$ROOT/build/libXrdOssMdsplus-5.so" # what actually exists
-SOCKET="$WORK/evald.sock"
+MDSIP_PORT=${E2E_MDSIP_PORT:-8100}
 EXPORT_DIR="$WORK/export"
 CFG="$WORK/xrootd.cfg"
 
@@ -22,21 +22,22 @@ rm -rf "$WORK"
 mkdir -p "$WORK/admin" "$WORK/run" "$EXPORT_DIR/plain" "$EXPORT_DIR/tdi"
 echo "hello-passthrough" > "$EXPORT_DIR/plain/hello.txt"
 
-sed -e "s#@@PLUGIN@@#$PLUGIN#" -e "s#@@SOCKET@@#$SOCKET#" \
+sed -e "s#@@PLUGIN@@#$PLUGIN#" -e "s#@@MDSIP@@#localhost:$MDSIP_PORT#" \
     -e "s#@@EXPORT@@#$EXPORT_DIR#" -e "s#@@PORT@@#$PORT#" -e "s#@@WORK@@#$WORK#" \
     "$ROOT/tests/integration/xrootd-test.cfg" > "$CFG"
 
-EVAL_PID=""
+MDSIP_PID=""
 XRD_PID=""
 cleanup() {
-  [ -n "$XRD_PID"  ] && kill "$XRD_PID"  2>/dev/null || true
-  [ -n "$EVAL_PID" ] && kill "$EVAL_PID" 2>/dev/null || true
+  [ -n "$XRD_PID"   ] && kill "$XRD_PID"   2>/dev/null || true
+  [ -n "$MDSIP_PID" ] && kill "$MDSIP_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-python "$ROOT/evaluator/fdp_mdsplus_evald.py" --socket "$SOCKET" & EVAL_PID=$!
-for _ in $(seq 1 100); do [ -S "$SOCKET" ] && break; sleep 0.1; done
-[ -S "$SOCKET" ] || { echo "FAIL: evaluator socket never appeared"; exit 1; }
+# shellcheck source=../mdsip_helper.sh
+. "$ROOT/tests/mdsip_helper.sh"
+
+start_mdsip "$MDSIP_PORT" "${FDP_TREES:-/tmp/fdp-trees}" "$WORK"
 
 fail() { echo "FAIL: $1"; echo "--- xrootd log ---"; tail -30 "$WORK/xrootd.log" 2>/dev/null; exit 1; }
 
@@ -59,18 +60,9 @@ xrdcp -f "root://localhost:$PORT//plain/hello.txt" "$WORK/out.txt" >/dev/null 2>
 grep -q hello-passthrough "$WORK/out.txt" || fail "pass-through content wrong"
 echo "OK"
 
-# Build a canonical request path. '-' is the reserved no-tree segment, so this
-# needs no staged MDSplus data (see tests/fed/FINDINGS.md).
-mkpath() {
-  python - "$@" <<'PY'
-import base64, struct, sys
-items = [(a.split('=', 1)[0].encode(), a.split('=', 1)[1].encode()) for a in sys.argv[1:]]
-c = struct.pack('>BH', 1, len(items))
-for n, e in items:
-    c += struct.pack('>H', len(n)) + n + struct.pack('>I', len(e)) + e + struct.pack('>B', 0)
-print('/tdi/-/00/00/00/00/0/' + base64.urlsafe_b64encode(c).decode().rstrip('='))
-PY
-}
+# '-' is the reserved no-tree segment, so this needs no staged MDSplus data.
+# The payload is MDSplus's own serialised GetMany list (see tests/mkpath.py).
+mkpath() { python "$ROOT/tests/mkpath.py" - 0 "$@"; }
 
 echo "--- 2. single expression through the plugin ---"
 P=$(mkpath 'r0=[1.0,2.0,3.0]')
@@ -108,7 +100,7 @@ echo "OK ($SIZE bytes)"
 
 echo "--- 5. a malformed request is refused, not served ---"
 if xrdcp -f "root://localhost:$PORT//tdi/-/00/00/00/00/0/QUJD" "$WORK/bad.bin" >/dev/null 2>&1; then
-  fail "a non-Request payload should not have been served"
+  fail "a payload mdsip cannot parse should not have been served"
 fi
 echo "OK"
 

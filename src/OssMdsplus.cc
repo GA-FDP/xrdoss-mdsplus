@@ -37,9 +37,9 @@ void FillStat(struct stat *buf, size_t size) {
 // ---------------------------------------------------------------- OssMdsplus
 
 OssMdsplus::OssMdsplus(XrdOss &next, XrdSysError &log, const std::string &prefix,
-                       const std::string &socket_path, size_t cache_bytes, int timeout_ms)
+                       const std::string &server, size_t cache_bytes, int timeout_ms)
     : XrdOssWrapper(next), log_(log), prefix_(prefix),
-      client_(socket_path, timeout_ms), cache_(cache_bytes) {}
+      client_(server, timeout_ms), cache_(cache_bytes) {}
 
 XrdOssDF *OssMdsplus::newFile(const char *tident) {
     std::unique_ptr<XrdOssDF> next(wrapPI.newFile(tident));
@@ -63,7 +63,7 @@ bool OssMdsplus::Materialize(const std::string &lfn, std::string &payload,
         return false;
     }
 
-    if (!client_.Evaluate(target.tree, target.shot, target.request, payload, error))
+    if (!client_.Evaluate(target.tree, target.shot, target.payload, payload, error))
         return false;
 
     cache_.Put(lfn, payload);
@@ -163,15 +163,15 @@ XrdOss *XrdOssAddStorageSystem2(XrdOss *curr_oss, XrdSysLogger *logger,
     static XrdSysError eDest(logger, "ossmdsplus_");
 
     const std::string prefix = ParmValue(parms, "prefix", "/tdi");
-    const std::string socket = ParmValue(parms, "socket", "/run/fdp/evald.sock");
+    const std::string server = ParmValue(parms, "server", "localhost:8000");
     const size_t cache_bytes =
         std::strtoull(ParmValue(parms, "cache", "268435456").c_str(), 0, 10);
     const int timeout_ms = std::atoi(ParmValue(parms, "timeout", "30000").c_str());
 
     eDest.Say("++++++ XrdOssMdsplus initializing; prefix=", prefix.c_str(),
-              " socket=", socket.c_str());
+              " server=", server.c_str());
 
-    return new fdp::OssMdsplus(*curr_oss, eDest, prefix, socket, cache_bytes, timeout_ms);
+    return new fdp::OssMdsplus(*curr_oss, eDest, prefix, server, cache_bytes, timeout_ms);
 }
 
 }

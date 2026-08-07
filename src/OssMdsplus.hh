@@ -1,7 +1,7 @@
 #ifndef FDP_OSSMDSPLUS_HH
 #define FDP_OSSMDSPLUS_HH
 
-#include "EvalClient.hh"
+#include "MdsIpClient.hh"
 #include "ResultCache.hh"
 #include "TdiPath.hh"
 
@@ -23,7 +23,7 @@ namespace fdp {
 class OssMdsplus : public XrdOssWrapper {
 public:
     OssMdsplus(XrdOss &next, XrdSysError &log, const std::string &prefix,
-               const std::string &socket_path, size_t cache_bytes, int timeout_ms);
+               const std::string &server, size_t cache_bytes, int timeout_ms);
 
     XrdOssDF *newFile(const char *tident);
     XrdOssDF *newDir(const char *tident);
@@ -38,7 +38,7 @@ public:
 private:
     XrdSysError &log_;
     std::string  prefix_;
-    EvalClient   client_;
+    MdsIpClient  client_;
     ResultCache  cache_;
 };
 

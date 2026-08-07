@@ -232,6 +232,42 @@ With the wrap in place, `\ipmhd`, `\q95` and `\psirz` (4,326,400 bytes) all
 match a direct MDSplus read exactly in shape, dtype and values, and
 `dim_of(\ipmhd)` returns the real time base of 256 points over 100–5320 ms.
 
+## Migration to mdsip — what the linkage actually costs
+
+The evaluator was replaced by mdsip + `GetManyExecute($)` (see
+[`../../docs/mdsip-spike.md`](../../docs/mdsip-spike.md)). One claim made when
+justifying that did not survive contact:
+
+> "MdsIpShr is a socket protocol client. It does not open trees or evaluate
+> TDI, so the reason for keeping MDSplus out of XRootD does not apply."
+
+`objdump -p libMdsIpShr.so` says otherwise — these are **direct** `DT_NEEDED`
+entries, not transitive:
+
+```
+NEEDED  libTdiShr.so
+NEEDED  libTreeShr.so
+NEEDED  libMdsShr.so
+```
+
+So linking it loads TDI and TreeShr into the XRootD process. We still never
+*call* them — evaluation happens in the mdsip process, and a crash there takes
+down mdsip rather than the origin — but the isolation is weaker than claimed:
+their static initialisers run and their global state exists in-process.
+
+**Packaging consequence.** The stock Pelican origin image has no MDSplus
+runtime, so the plugin cannot load there:
+
+```
+Plugin No such file or directory loading osslib /plugins/libXrdOssMdsplus.so
+```
+
+Mounting the conda build in does not work either — conda's `libicuuc` needs
+`GLIBCXX_3.4.30` and the image ships an older `libstdc++`. A production origin
+needs an image with MDSplus installed from OSG/EPEL. Until that exists,
+`run_fed_test.sh` skips with an explanation; `tests/integration/` covers the
+plugin end to end without a container.
+
 ## Reproduce
 
 ```bash
