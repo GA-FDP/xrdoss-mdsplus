@@ -1,13 +1,14 @@
 # xrdoss-mdsplus
 
-An out-of-tree XRootD `XrdOss` plugin that serves MDSplus TDI evaluation
-results as virtual files, plus the out-of-process evaluator it talks to.
+An out-of-tree XRootD `XrdOss` plugin that serves MDSplus TDI evaluation results
+as virtual files. Evaluation is delegated to MDSplus's own `mdsip` server via
+`GetManyExecute($)`, so the plugin itself is a path parser and a pipe.
 
 Loaded into a **stock** Pelican origin — no fork — by pointing
 `Xrootd.ConfigFile` at a fragment containing:
 
 ```
-ofs.osslib ++ /path/to/libXrdOssMdsplus.so prefix=/tdi socket=/run/fdp/evald.sock
+ofs.osslib ++ /path/to/libXrdOssMdsplus.so prefix=/tdi server=localhost:8000
 ```
 
 Note the name in the config has **no `-5` suffix** even though the file on disk
@@ -27,7 +28,7 @@ the federation intact (see [Why the path carries everything](#why-the-path-carri
   │ CLIENT                                                                 │
   │   asks for an object path, deserializes the bytes it gets back         │
   └───────────────────────────────┬────────────────────────────────────────┘
-                                  │  GET /fdp-d3d/tdi/efit01/00/00/19/00/190000/AQABAAJpcAAAAAZcaXBtaGQA
+                                  │  GET /fdp-d3d/tdi/efit01/00/00/19/00/190000/BADWxBAA...
                                   ▼
   ┌────────────────────────────────────────────────────────────────────────┐
   │ PELICAN DIRECTOR                        (stock Pelican, unmodified)    │
@@ -42,7 +43,7 @@ the federation intact (see [Why the path carries everything](#why-the-path-carri
                                   │  (miss)
                                   ▼
   ┌────────────────────────────────────────────────────────────────────────┐
-  │ ORIGIN — XRootD managed by Pelican      (stock image, config only)     │
+  │ ORIGIN — XRootD managed by Pelican      (stock image + MDSplus runtime)│
   │                                                                        │
   │   ofs.osslib  default                  ← native POSIX storage          │
   │   ofs.osslib ++ libXrdOssStats.so      ← Pelican's own layer           │
@@ -61,33 +62,40 @@ the federation intact (see [Why the path carries everything](#why-the-path-carri
   │          ▼                                                             │
   │   ParseTdiPath          TdiPath.cc   split path, validate shot bucket  │
   │     └─ join chunks                   ≤249 bytes each (NAME_MAX)        │
-  │     └─ Base64UrlDecode  Base64Url.cc                                   │
-  │     └─ Request::Parse   Request.cc   strict: version, no trailing bytes│
+  │     └─ Base64UrlDecode  Base64Url.cc → opaque payload, NOT parsed      │
   │          ▼                                                             │
   │   ResultCache           ResultCache.cc   hit? serve it                 │
   │          │ miss                                                        │
   │          ▼                                                             │
-  │   EvalClient            EvalClient.cc    frame + unix socket           │
+  │   MdsIpClient           MdsIpClient.cc   ConnectToMds / MdsOpen         │
   └───────────────────────────────┬────────────────────────────────────────┘
-                                  │  u32 len | u16 tree_len | tree | i64 shot | request
+                                  │  MdsValueDsc(id, "GetManyExecute($)", payload)
                                   ▼
   ┌────────────────────────────────────────────────────────────────────────┐
-  │ fdp-mdsplus-evald            (evaluator/, separate process)            │
+  │ mdsip -m                     (MDSplus's own server, separate process)  │
   │                                                                        │
-  │   parse_request()          same canonical format the path carried      │
-  │   reset_private/public()   ⚠ or TDI state leaks between requests       │
-  │   MDSplus.Tree(...)        local disk — this is where the win is       │
-  │   data(<expr>)             ⚠ or the result references tree nodes       │
-  │   serialize()              → MDSplus descriptor bytes                  │
+  │   GetManyExecute($)        upstream C++: evaluates every item and      │
+  │                            returns an ALREADY-serialized dictionary    │
+  │                            (mdsobjects/cpp/mdsdata.c:921)              │
+  │   process per connection   -m; GetManyExecute uses a static XD and is  │
+  │                            not thread-safe                             │
   └───────────────────────────────┬────────────────────────────────────────┘
-                                  │  u8 status | u32 len | payload
+                                  │  serialized {name: {value|error}}
                                   ▼
                      back up the stack, cached, served as file bytes
 ```
 
-MDSplus is **never linked into XRootD**. The plugin is a path parser plus a
-socket client; a crash, hang or leak in MDSplus takes down a disposable worker
-rather than the origin.
+The plugin never interprets the payload. It decodes the path, hands the bytes to
+`GetManyExecute($)`, and writes the answer out verbatim — MDSplus is the only
+thing that understands the request format, so there is one definition of it
+rather than ours plus theirs. Semantics therefore match `atlas.gat.com` by
+construction rather than by testing.
+
+**On isolation.** Evaluation happens in the mdsip process, so a crash or hang in
+tree opening or TDI takes down a disposable worker rather than the origin. But
+the separation is not total: `libMdsIpShr.so` directly `DT_NEEDED`s `libTdiShr`,
+`libTreeShr` and `libMdsShr`, so those libraries are *loaded* into the XRootD
+process even though we never call them. See `tests/fed/FINDINGS.md`.
 
 ### Stat, then Read
 
@@ -106,25 +114,24 @@ invalidation logic at all.
 `\ipmhd` from `efit01`, shot 190000, labelled `ip`:
 
 ```
-canonical request   01 0001 0002 6970 00000006 5c69706d686400   (18 bytes)
-                    │  │    │    │    │        └─ "\ipmhd", then 0 args
-                    │  │    │    │    └─ u32 expression length
-                    │  │    │    └─ "ip"
-                    │  │    └─ u16 name length
-                    │  └─ u16 item count
-                    └─ u8 format version
+request      apd.List([apd.Dictionary({'name':'ip','exp':'\\ipmhd','args':()})])
+             .serialize()                                        → 135 bytes
 
-base64url           AQABAAJpcAAAAAZcaXBtaGQA
+             i.e. exactly what MDSplus's GetMany builds and sends. We produce it
+             with tests/mkpath.py; a real client already has GetMany.serialize().
 
-path                /fdp-d3d/tdi/efit01/00/00/19/00/190000/AQABAAJpcAAAAAZcaXBtaGQA
-                                 │      └─────────┬──────┘ └──────┬─────────────┘
-                                 │                │               └─ the request
-                                 │                └─ shot/100 in digit pairs
-                                 └─ tree ('-' means: evaluate with no tree open)
+base64url    BADWxBAAAAAAAAABBAAAABQ...ANjEEAAAAAAAAAEYAAAAKAAAA...
 
-response            an MDSplus serialized dictionary: {"ip": {"value": <array>}}
-                    a failed expression yields {"ip": {"error": "..."}} and the
-                    response is still 200 — matching GetMany semantics
+path         /tdi/efit01/00/00/19/00/190000/BADWxBAAAAAAAAABBAAAABQ...
+                  │      └────────┬───────┘ └──────────┬──────────┘
+                  │               │                    └─ payload, chunked at
+                  │               │                       249 bytes per segment
+                  │               └─ shot/100 in digit pairs
+                  └─ tree ('-' means: evaluate with no tree open)
+
+response     a serialized dictionary {"ip": {"value": <array>}}; a failed
+             expression yields {"ip": {"error": "..."}} and the response is
+             still 200 — GetMany semantics, because it IS GetMany
 ```
 
 The digit-pair bucketing mirrors the existing MDSplus archive layout and keeps
@@ -147,21 +154,17 @@ cannot protect it because the decoded path is what gets normalised. base64url
 (`A-Za-z0-9-_`) survives; standard base64 does not. Measured, both ways, in
 [`tests/fed/FINDINGS.md`](tests/fed/FINDINGS.md).
 
-### Two things that look optional and are not
+### One thing that looks optional and is not
 
-**`data(...)` wrapping.** The evaluator wraps every expression, exactly as
-MDSplus's own `GetMany` does locally (`connection.py:392`). Without it, `\ipmhd`
-evaluates to `Build_Signal(Build_With_Units([...], "A"), *, \ATIME)` — values
-literal, but the time base still a *reference* to node `\ATIME`. Deserializing
-that needs the tree open in the client, which is never true here. The cost is
-that dimensions and units do not travel with a value; ask for `dim_of(...)` as
-another item in the same batch, which is nearly free.
+**mdsip needs `MDS_PATH` to include `tdi/remote`.** `GetManyExecute` is a TDI
+function (`tdi/remote/GetManyExecute.fun`), not a builtin. Without that path the
+server answers every request with `%TDI-E-UNKNOWN_VAR`, which reads like a
+client bug and is not one.
 
-**TDI state reset.** TDI variables persist across evaluations in a process, so a
-long-lived worker would leak them between requests — `_x = 41` in one request
-makes `_x + 1` return 42 in the next. That is both a cross-request information
-leak and a cache-correctness bug, since the same path would return different
-bytes depending on history.
+Two things that used to be required here are no longer: wrapping expressions in
+`data(...)`, and resetting TDI state between requests. Both were compensating
+for a bespoke evaluator that no longer exists — mdsip returns unwrapped nodes
+correctly and gives each connection its own process. See `docs/mdsip-spike.md`.
 
 ### Not yet built
 
@@ -182,7 +185,7 @@ deploy.
 | Path | What |
 |---|---|
 | `src/` | The plugin. Logic lives in small units (`Base64Url`, `TdiPath`, `MdsIpClient`, `ResultCache`); `OssMdsplus.cc` is thin wiring over them. |
-| `tests/` | doctest unit tests, pytest for the evaluator |
+| `tests/` | doctest unit tests; `mkpath.py` is the Python-side reference implementation of the path grammar |
 | `tests/fed/` | Local Pelican federation in podman — see `tests/fed/FINDINGS.md` |
 | `tests/integration/` | Standalone XRootD end-to-end |
 
@@ -191,7 +194,13 @@ deploy.
 ```bash
 pixi run build     # -> build/libXrdOssMdsplus-5.so
 pixi run test      # doctest suites via ctest
-pixi run pytest    # evaluator tests
+```
+
+End-to-end (starts mdsip and a standalone XRootD for you):
+
+```bash
+pixi run bash tests/integration/run_e2e.sh        # ~1s, no container
+pixi run bash tests/integration/test_real_tree.sh # needs a staged tree
 ```
 
 XRootD is pinned `<6` to match the deployed v5 plugin chain. The Pelican origin
@@ -206,6 +215,12 @@ bash tests/fed/fedbox.sh start /tmp/extra.cfg     # with an osslib fragment
 bash tests/fed/fedbox.sh start /tmp/extra.cfg /path/to/plugin.so
 bash tests/fed/fedbox.sh stop
 ```
+
+`tests/fed/run_fed_test.sh` currently **skips**: the plugin links `MdsIpShr`,
+and the stock Pelican image has no MDSplus runtime. Mounting the conda build in
+does not work either — its `libicuuc` wants `GLIBCXX_3.4.30` and the image ships
+an older `libstdc++`. Building an MDSplus-capable origin image restores this
+layer, which is the only one that exercises the director.
 
 ## Design
 
