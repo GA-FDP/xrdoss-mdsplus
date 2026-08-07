@@ -96,3 +96,47 @@ pixi run env efit01_path=/tmp/fdp-trees MDS_PATH="$P/tdi;$P/tdi/remote" \
 
 Two gotchas that cost time: `ConnectToMds` returns **0 as a valid connection
 id** (only `-1` is failure), and the descriptor field is `class_`, not `dclass`.
+
+---
+
+# Follow-up: static-linking experiment (2026-08-07)
+
+**Question:** can the plugin static-link `MdsIpShr` so the origin image needs no
+MDSplus runtime?
+
+**Answer: yes technically, but it must be built against the target image.**
+
+`libMdsIpShr.a` alone is not enough — the objects the linker pulls in
+(`MdsValue.c.o`, `Connections.c.o`) reference `MdsShr` and `TdiShr`, leaving
+`MdsGetMsg`, `MdsSerializeDscIn`, `TdiRestoreContext` and friends unresolved.
+Linking the full chain does work:
+
+```
+libMdsIpShr.a libMdsShr.a libTdiShr.a libTreeShr.a  (repeat the first two for
+                                                     circular refs) -lz -lxml2
+```
+
+That produces a 2.6 MB plugin whose only `DT_NEEDED` entries are
+`libXrdUtils`, `libz`, `libxml2`, and the C/C++ runtime — **no MDSplus
+libraries at all**. It passes the full real-tree suite: `\ipmhd`, `\q95` and
+`\psirz` all match a direct read.
+
+**The blocker is toolchain, not linkage.** A conda-built plugin still cannot
+load in the stock Pelican image:
+
+| | conda build | Pelican image (EL9) |
+|---|---|---|
+| libxml2 soname | `libxml2.so.16` | `libxml2.so.2` |
+| `GLIBCXX_3.4.30` in libstdc++ | present | **absent** |
+
+So the packaging conclusion is to **build in an image derived from the Pelican
+origin image** (plus `xrootd-devel` and the MDSplus static libs), producing a
+plugin that drops into the **stock** runtime image. That is a better outcome
+than a derived runtime image: the origin stays as shipped.
+
+**Correction to the motivation.** When proposing this experiment I said static
+linking would mean "MDSplus exists only inside the sandboxed mdsip container."
+That was wrong. The mdsip *client* code is inside the plugin either way —
+statically welded in rather than loaded as separate `.so` files. Static linking
+buys packaging simplicity, **not** isolation. The isolation argument rests
+entirely on evaluation happening in the mdsip process, which is unchanged.
