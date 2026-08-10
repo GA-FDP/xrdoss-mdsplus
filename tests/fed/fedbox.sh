@@ -9,7 +9,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-IMAGE="${FEDBOX_IMAGE:-hub.opensciencegrid.org/pelican_platform/origin:latest}"
+IMAGE="${FEDBOX_IMAGE:-localhost/fdp-origin-mdsplus:latest}"
+
+# podman derives several paths from /run/user/$UID, which does not survive the
+# login session that created it. If it is gone, point XDG_RUNTIME_DIR somewhere
+# durable -- podman otherwise fails with an unhelpful "mkdir /run/user/N:
+# permission denied". See docs/deployment-notes.md.
+if [ ! -d "/run/user/$(id -u)" ]; then
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/xdg-$(id -u)}"
+  mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+fi
 NAME="fdp-fedbox"
 DATA="${FEDBOX_DATA:-$ROOT/tests/fed/data}"
 WEB_PORT="${FEDBOX_WEB_PORT:-8444}"

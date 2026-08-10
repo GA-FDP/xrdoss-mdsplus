@@ -11,7 +11,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WEB=${FEDBOX_URL:-https://localhost:8444}
-FEDBOX_IMAGE_CHECK=${FEDBOX_IMAGE:-hub.opensciencegrid.org/pelican_platform/origin:latest}
 MDSIP_PORT=${FED_MDSIP_PORT:-8000}
 WORK=${FED_WORK:-/tmp/fdp-fed-run}
 OUT=/tmp/fdp-fed-out
@@ -42,22 +41,13 @@ rm -rf "$WORK" "$OUT"; mkdir -p "$WORK" "$OUT"
 # reaches it at localhost:$MDSIP_PORT.
 start_mdsip "$MDSIP_PORT" "${FDP_TREES:-/tmp/fdp-trees}" "$WORK"
 
-# The plugin links libMdsIpShr, which DT_NEEDEDs libTdiShr, libTreeShr and
-# libMdsShr. The stock Pelican image has none of them, and mounting the conda
-# build in does not work either: conda's libicuuc needs GLIBCXX_3.4.30 while the
-# image ships an older libstdc++. A production origin therefore needs an image
-# with MDSplus installed from OSG/EPEL -- see docs/mdsip-spike.md.
-#
-# Until that image exists this test cannot run. Skip loudly rather than fail
-# obscurely; tests/integration/ covers the same ground without a container.
-if ! podman run --rm --entrypoint bash "$FEDBOX_IMAGE_CHECK" \
-       -c 'ls /usr/lib64/libMdsIpShr.so' >/dev/null 2>&1; then
-  echo "SKIP: the origin image has no MDSplus runtime (libMdsIpShr)."
-  echo "      The plugin now links MdsIpShr, so the federation test needs an"
-  echo "      image with MDSplus installed. See docs/mdsip-spike.md."
-  echo "      tests/integration/run_e2e.sh and test_real_tree.sh still cover"
-  echo "      the plugin end to end without a container."
-  exit 0
+# The plugin links libMdsIpShr, whose transport (libMdsIpTCP.so) ConnectToMds
+# dlopens BY NAME at runtime -- so the origin image must carry the MDSplus
+# runtime no matter how the plugin is linked. Containerfile.runtime builds it.
+if ! podman image exists "${FEDBOX_IMAGE:-localhost/fdp-origin-mdsplus:latest}" 2>/dev/null; then
+  echo "FAIL: build the origin image first:"
+  echo "      podman build -f Containerfile.runtime -t fdp-origin-mdsplus ."
+  exit 1
 fi
 
 bash "$ROOT/tests/fed/fedbox.sh" start \

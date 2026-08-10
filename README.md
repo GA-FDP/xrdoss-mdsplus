@@ -173,7 +173,6 @@ This repo currently implements the origin side only. Still to come, in order:
 | Piece | Status |
 |---|---|
 | Sandboxing mdsip | **not built** — TDI can `spawn()`, so this is required before any exposure |
-| An origin image carrying the MDSplus runtime | **not built** — the plugin links `MdsIpShr`, which the stock Pelican image lacks |
 | Version segment in the path | **not built** — without it a re-analysed shot is served stale forever, because XrdPfc never revalidates |
 | `libMdsIpFDP.so` client transport | not built — lets stock `MDSplus.Connection` use this by changing only its connection string |
 
@@ -216,11 +215,17 @@ bash tests/fed/fedbox.sh start /tmp/extra.cfg /path/to/plugin.so
 bash tests/fed/fedbox.sh stop
 ```
 
-`tests/fed/run_fed_test.sh` currently **skips**: the plugin links `MdsIpShr`,
-and the stock Pelican image has no MDSplus runtime. Mounting the conda build in
-does not work either — its `libicuuc` wants `GLIBCXX_3.4.30` and the image ships
-an older `libstdc++`. Building an MDSplus-capable origin image restores this
-layer, which is the only one that exercises the director.
+`tests/fed/run_fed_test.sh` needs the MDSplus-capable origin image, because
+`ConnectToMds` dlopens `libMdsIpTCP.so` by name at runtime:
+
+```bash
+podman build -f Containerfile.runtime -t fdp-origin-mdsplus .
+pixi run bash tests/fed/run_fed_test.sh
+```
+
+This is the only layer that exercises the director. See
+[`docs/deployment-notes.md`](docs/deployment-notes.md) if podman complains about
+`/run/user/$UID`.
 
 ## Design
 
