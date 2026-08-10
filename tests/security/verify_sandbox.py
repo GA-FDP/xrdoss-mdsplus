@@ -98,6 +98,27 @@ expect("not running as root", uid != 0,
        "mdsip is running as uid 0",
        "code execution as root inside the namespace is a much shorter path out")
 
+# In rootless podman, container uid 0 maps to the *invoking user*. Run the
+# sandbox as the same account that runs the Pelican origin and becoming
+# container-root is becoming the owner of issuer.jwk -- one mapping away,
+# blocked only by cap-drop/no-new-privileges holding. Run it as a dedicated
+# service account and that path does not exist to be attacked.
+#
+# The server's own uid is already distinct (container 5000 maps high into the
+# subuid range); this checks the escalation target, which is the one that
+# matters.
+ORIGIN_UID = os.environ.get("MDSIP_ORIGIN_UID", "")
+if ORIGIN_UID:
+    expect_shell_fails(
+        "container root is not the origin uid",
+        "grep -qE '^[[:space:]]*0[[:space:]]+%s[[:space:]]' /proc/self/uid_map"
+        % ORIGIN_UID,
+        "container-root maps to uid %s, which owns the origin's issuer keys; "
+        "run the sandbox as a dedicated service account" % ORIGIN_UID)
+else:
+    print("  %-34s SKIP (set MDSIP_ORIGIN_UID)" % "container root vs origin uid")
+    print("    unchecked: whether container-root maps to the origin's user")
+
 # --- the crown jewels ---------------------------------------------------
 # A stolen issuer key mints arbitrary federation tokens. Nothing else in this
 # file matters as much as these two.

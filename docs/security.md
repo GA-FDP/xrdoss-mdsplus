@@ -91,6 +91,7 @@ run.
 | No capabilities | `--cap-drop=ALL` | most escape paths |
 | No privilege regain | `--security-opt=no-new-privileges` | setuid escalation |
 | Not uid 0 | `USER mdsip` (5000) | shortening the path out of the namespace |
+| Dedicated service account | run rootless podman as `fdp-mdsip`, not the origin's user | container-root mapping to the owner of `issuer.jwk` |
 | Bounded forks | `--pids-limit 256` | fork bombs |
 | Bounded memory and CPU | `--memory 2g --cpus 2` | resource exhaustion |
 | Process per connection | `mdsip -m` | one client's crash or hang staying its own |
@@ -201,11 +202,81 @@ verifier:
   slirp4netns. Named bridge networks should be unaffected, but confirm port
   publishing works at all.
 
-**The origin is one host.** mdsip and the Pelican origin would share a kernel
-and a host uid (1122), so "separate container" means separate filesystem and
-credentials — not separate machine. A kernel escape reaches the origin's files
-as that user. That is the strongest argument for the microVM option below, and
-the reason the issuer keys' isolation rests on the kernel holding.
+## Run it as a dedicated service account
+
+**Rootless podman maps container uid 0 to the invoking user.** Measured on a
+running sandbox:
+
+```
+$ podman exec fdp-mdsip cat /proc/self/uid_map
+         0       1122          1          <- container-root IS the invoking user
+         1     886432      65536
+```
+
+The server itself is already well separated: it runs as container uid 5000,
+which maps high into the subuid range (host 891431 above), and an escape from
+*that* cannot read uid 1122's files. The exposure is narrower and worse: if a
+client ever becomes **container-root**, it becomes the account that owns the
+origin's `issuer.jwk`. Today that is blocked by `--cap-drop=ALL`,
+no-new-privileges, a non-root uid and no setuid binaries — four controls
+holding one door shut.
+
+Running the sandbox as a **separate service account** removes the door. Then
+container-root maps to an account that owns nothing, and the crown jewel is
+protected by ordinary file permissions rather than by every one of those
+controls continuing to hold.
+
+```bash
+# as root, once
+useradd --system --create-home --home-dir /var/lib/fdp-mdsip \
+        --shell /sbin/nologin fdp-mdsip
+# system accounts get no subuid range automatically; pick one that does not
+# overlap an existing entry in /etc/subuid
+usermod --add-subuids 900000-965535 --add-subgids 900000-965535 fdp-mdsip
+loginctl enable-linger fdp-mdsip          # or the container dies with the session
+
+# the trees must be readable by the new account, and only readable
+setfacl -R -m u:fdp-mdsip:rX /srv/fdp/trees
+```
+
+Then install [`deploy/fdp-mdsip.container`](../deploy/fdp-mdsip.container) as a
+systemd **user** unit under that account, and verify with the origin's uid
+supplied so the check is live rather than skipped:
+
+```bash
+MDSIP_ORIGIN_UID=1122 pixi run sandbox-verify
+```
+
+The verifier reads `/proc/self/uid_map` through ordinary TDI and fails if
+container-root maps to that uid. It is tested in both directions — it fails
+against the current shared-account setup and passes against a separate one —
+because a check that cannot fail proves nothing.
+
+### One consequence: the two containers can no longer share a network
+
+Rootless podman networks are **per-user**, so once mdsip runs as its own
+account, the origin container cannot join `fdp-mdsip-net` and cannot resolve
+`fdp-mdsip` by name. The relay has to reach mdsip over the host instead:
+publish on `127.0.0.1:8000` as the unit does, and point the relay at
+`host.containers.internal` rather than `localhost`.
+
+```
+http.exthandler mdsip /path/to/libXrdHttpMdsip.so prefix=/mdsip,host=host.containers.internal,port=8000
+```
+
+`localhost` inside the origin container is the *container*, not the host, so
+leaving it there fails to connect with nothing obviously wrong in either log.
+Confirm `host.containers.internal` resolves from inside the origin container
+before relying on it; publishing on a host IP the origin can reach works too.
+
+### What this does not fix
+
+**The origin is one host.** mdsip and Pelican still share a kernel, so a kernel
+escape still reaches everything on it regardless of uid. The separate account
+raises the bar from "one namespace mapping away" to "needs a kernel bug *and*
+a privilege escalation"; it does not remove the host as a shared fate. That is
+the remaining argument for the microVM option below — a weaker one than before
+this change, which is rather the point.
 
 The relay can then be run against the sandbox rather than a bare mdsip — the
 production topology, and the relay is indifferent to which:

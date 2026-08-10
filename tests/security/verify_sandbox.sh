@@ -58,4 +58,5 @@ exec 3<&- 3>&- 2>/dev/null || true
 # Propagated so the verifier can tell "control missing" from "control this host
 # cannot enforce, waived on purpose". Unset, the limit checks are hard failures.
 MDSIP_ALLOW_NO_LIMITS="${MDSIP_ALLOW_NO_LIMITS:-}" \
+MDSIP_ORIGIN_UID="${MDSIP_ORIGIN_UID:-}" \
   python "$ROOT/tests/security/verify_sandbox.py" "127.0.0.1:$PORT"

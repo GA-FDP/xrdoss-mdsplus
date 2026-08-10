@@ -62,6 +62,27 @@ esac
 [ -d "$TREES" ] || { echo "no tree directory at $TREES"; exit 1; }
 TREES="$(readlink -f "$TREES")"
 
+# Rootless podman maps container uid 0 to the INVOKING USER. Running this as the
+# same account that runs the Pelican origin means becoming container-root is
+# becoming the owner of issuer.jwk -- the one mapping that matters, and the one
+# thing cap-drop/no-new-privileges are holding shut. A dedicated service account
+# removes that path rather than defending it. See docs/security.md.
+ORIGIN_UID="${MDSIP_ORIGIN_UID:-}"
+if [ -n "$ORIGIN_UID" ] && [ "$(id -u)" = "$ORIGIN_UID" ]; then
+  if [ -z "${MDSIP_ALLOW_ORIGIN_UID:-}" ]; then
+    cat >&2 <<EOF
+REFUSING TO START: running as uid $ORIGIN_UID, the same account that runs the
+origin. Rootless podman maps container uid 0 to it, so container-root would be
+the owner of the origin's issuer keys.
+
+Fix it: run as a dedicated service account (see docs/security.md), or accept
+the risk deliberately with MDSIP_ALLOW_ORIGIN_UID=1.
+EOF
+    exit 1
+  fi
+  echo "WARNING: running as the origin's uid $ORIGIN_UID -- container-root maps to it" >&2
+fi
+
 # A resource limit is only enforced if its cgroup controller is actually
 # delegated, and podman will accept the flag either way -- on cgroups v1
 # rootless it ignores all of them, announcing it in one line among its startup
@@ -156,4 +177,14 @@ podman run -d --name "$NAME" \
   "$IMAGE" >/dev/null
 
 echo "started $NAME on $PUBLISH -> 8000 (trees $TREES, read-only)"
+
+# Print the identity mapping rather than leaving it to be inferred: the host uid
+# behind container-root is what an escape would land on, and it is invisible
+# from every other angle.
+MAP="$(podman exec "$NAME" cat /proc/self/uid_map 2>/dev/null || true)"
+if [ -n "$MAP" ]; then
+  ROOT_HOST_UID="$(echo "$MAP" | awk '$1 == 0 {print $2; exit}')"
+  SERVER_HOST_UID="$(echo "$MAP" | awk '$1 != 0 {print $2 + (5000 - $1); exit}')"
+  echo "  running as host uid ${SERVER_HOST_UID:-?}; container-root maps to host uid ${ROOT_HOST_UID:-?}"
+fi
 echo "verify with: bash tests/security/verify_sandbox.sh"

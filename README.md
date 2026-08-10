@@ -310,10 +310,18 @@ MDSIP_SANDBOX=1 pixi run relay-e2e   # the relay against the sandbox
 ```
 
 `scripts/mdsip-sandbox.sh` runs mdsip in its own container with no route off
-the host, a read-only root, read-only trees, no capabilities, and resource
-limits. It is a **separate container from the origin** — the single most
-important control, because a stolen `issuer.jwk` mints arbitrary federation
-tokens.
+the host, no resolver, a read-only root, read-only trees, no capabilities, and
+resource limits. It is a **separate container from the origin** — the single
+most important control, because a stolen `issuer.jwk` mints arbitrary
+federation tokens.
+
+Run it under a **dedicated service account**, not the account that runs the
+origin: rootless podman maps container uid 0 to the invoking user, so sharing
+the account makes container-root the owner of the issuer keys.
+[`deploy/fdp-mdsip.container`](deploy/fdp-mdsip.container) is the quadlet unit
+for that; `docs/security.md` has the account setup and one consequence worth
+knowing — the two containers can no longer share a podman network, so the relay
+must reach mdsip via `host.containers.internal`.
 
 `tests/security/verify_sandbox.sh` asserts each control by attacking it through
 ordinary TDI, the same channel a client has. It first confirms the client

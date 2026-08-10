@@ -1,0 +1,61 @@
+# Quadlet unit for the mdsip sandbox.
+#
+# Install as a SYSTEMD USER unit under a dedicated service account -- not under
+# the account that runs the Pelican origin. Rootless podman maps container uid 0
+# to the invoking user, so running this as the origin's user would make
+# container-root the owner of issuer.jwk. See docs/security.md.
+#
+#   install -m 0644 fdp-mdsip.container ~/.config/containers/systemd/
+#   systemctl --user daemon-reload
+#   systemctl --user start fdp-mdsip
+#
+# The account needs lingering (`loginctl enable-linger fdp-mdsip`) or the
+# container stops when its last session ends.
+#
+# Every option here mirrors scripts/mdsip-sandbox.sh; that script is the
+# reference and this is the deployment vehicle. Changing one without the other
+# is how a control goes missing.
+
+[Unit]
+Description=FDP mdsip sandbox (MDSplus server behind the xrdoss-mdsplus plugins)
+Documentation=https://github.com/GA-FDP/xrdoss-mdsplus/blob/main/docs/security.md
+After=network-online.target
+
+[Container]
+Image=localhost/fdp-mdsip:latest
+ContainerName=fdp-mdsip
+
+# Create with: podman network create --internal fdp-mdsip-net
+# --internal is the control that turns code execution into a dead end rather
+# than a pivot; without it this unit is not a sandbox.
+Network=fdp-mdsip-net
+PublishPort=127.0.0.1:8000:8000
+
+ReadOnly=true
+Tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m
+# Masks the host subscription credentials podman mounts here by default.
+Tmpfs=/run/secrets:rw,noexec,nosuid,nodev,size=1m
+
+# Adjust to the real tree location. It must be read-only: the archive policy is
+# read-only, and the server has arbitrary code execution.
+Volume=/srv/fdp/trees:/trees:ro
+
+DropCapability=ALL
+NoNewPrivileges=true
+
+Environment=efit01_path=/trees
+Environment=default_tree_path=/trees
+
+# --dns=none closes DNS as an exfiltration channel regardless of what the
+# network backend does; the sandbox connects to nothing and needs no resolver.
+# The limits are in PodmanArgs for portability across podman versions, and are
+# enforced only where the matching cgroup controller is delegated -- on a
+# rootless v2 host that is usually memory and pids but not cpu.
+PodmanArgs=--dns=none --memory=8g --pids-limit=512
+
+[Service]
+Restart=always
+TimeoutStartSec=90
+
+[Install]
+WantedBy=default.target
