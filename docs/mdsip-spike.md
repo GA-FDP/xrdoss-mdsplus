@@ -178,3 +178,27 @@ where the client happens to run as the same user as the server will pass with
 
 **`MDS_PATH` must include `tdi/remote`**, or `GetManyExecute` is not found and
 every request fails with `%TDI-E-UNKNOWN_VAR`.
+
+
+---
+
+# Follow-up: per-request timeout (2026-08-10)
+
+`MdsValueDsc` takes no timeout, so a slow or hostile expression pinned an XRootD
+thread indefinitely — the cheapest denial of service in the system. Replaced
+with `SendDsc` x2 + `GetAnswerInfoTO(..., timeout)`.
+
+Verified: `wait(20)` with a 3-second budget returns at 3 seconds.
+
+**One trap worth recording.** `GetAnswerInfoTO` hands back mdsip's *own*
+serialization wrapping the payload (`dtype == 24`, `DTYPE_SERIAL` from
+`ipdesc.h`), not the bytes `GetManyExecute` produced. `MdsValueDsc` was peeling
+that layer internally via `MdsSerializeDscIn`, and dropping it silently returned
+the outer wrapper — the real-tree test caught it immediately as a data
+mismatch. An earlier note here claimed the switch would also avoid a
+deserialize round trip; it does not, and `MdsValue.c`'s handling was right all
+along.
+
+A result-size cap rides along on the same path. It cannot prevent the bytes
+being received — the API offers no way to bound that — but it stops an absurd
+result being cached and served, which is what actually costs the origin.

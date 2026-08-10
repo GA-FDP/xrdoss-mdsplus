@@ -1,0 +1,32 @@
+# Origin runtime image: stock Pelican origin plus the MDSplus runtime.
+#
+# The plugin cannot run on the stock image alone. ConnectToMds calls
+# LoadIo("tcp"), which dlopens libMdsIpTCP.so *by name* at runtime
+# (mdstcpip/mdsipshr/LoadIo.c:54-62), so no amount of static linking removes
+# the dependency -- see docs/mdsip-spike.md.
+#
+# Deliberately the kernel package only: no devel, no IDL/Java/Motif bindings.
+#
+#   podman build -f Containerfile.runtime -t fdp-origin-mdsplus .
+
+FROM hub.opensciencegrid.org/pelican_platform/origin:latest
+
+ARG MDSPLUS_VERSION=7.158-2
+ARG MDSPLUS_REPO=http://www.mdsplus.org/dist/rhel9/stable/RPMS/x86_64
+
+USER root
+
+RUN dnf -y install \
+      ${MDSPLUS_REPO}/mdsplus-kernel_bin-${MDSPLUS_VERSION}.el9.x86_64.rpm \
+ && dnf clean all \
+ && rm -rf /var/cache/dnf
+
+# MDSplus installs outside the default loader path, so the transport plugin
+# would still not be found without this.
+RUN echo /usr/local/mdsplus/lib64 > /etc/ld.so.conf.d/mdsplus.conf && ldconfig
+
+# Fail the build, not the deployment, if the transport is missing or unresolved.
+RUN set -eux; \
+    ldconfig -p | grep -q libMdsIpTCP; \
+    test -f /usr/local/mdsplus/lib64/libMdsIpTCP.so; \
+    ! ldd /usr/local/mdsplus/lib64/libMdsIpShr.so | grep -q "not found"

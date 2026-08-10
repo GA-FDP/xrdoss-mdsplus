@@ -37,9 +37,10 @@ void FillStat(struct stat *buf, size_t size) {
 // ---------------------------------------------------------------- OssMdsplus
 
 OssMdsplus::OssMdsplus(XrdOss &next, XrdSysError &log, const std::string &prefix,
-                       const std::string &server, size_t cache_bytes, int timeout_ms)
+                       const std::string &server, size_t cache_bytes, int timeout_ms,
+                       size_t max_result_bytes)
     : XrdOssWrapper(next), log_(log), prefix_(prefix),
-      client_(server, timeout_ms), cache_(cache_bytes) {}
+      client_(server, timeout_ms, max_result_bytes), cache_(cache_bytes) {}
 
 XrdOssDF *OssMdsplus::newFile(const char *tident) {
     std::unique_ptr<XrdOssDF> next(wrapPI.newFile(tident));
@@ -167,11 +168,15 @@ XrdOss *XrdOssAddStorageSystem2(XrdOss *curr_oss, XrdSysLogger *logger,
     const size_t cache_bytes =
         std::strtoull(ParmValue(parms, "cache", "268435456").c_str(), 0, 10);
     const int timeout_ms = std::atoi(ParmValue(parms, "timeout", "30000").c_str());
+    // Bounds origin memory per request; 0 disables. Default 256 MiB.
+    const size_t max_result = std::strtoull(
+        ParmValue(parms, "maxresult", "268435456").c_str(), 0, 10);
 
     eDest.Say("++++++ XrdOssMdsplus initializing; prefix=", prefix.c_str(),
               " server=", server.c_str());
 
-    return new fdp::OssMdsplus(*curr_oss, eDest, prefix, server, cache_bytes, timeout_ms);
+    return new fdp::OssMdsplus(*curr_oss, eDest, prefix, server, cache_bytes,
+                               timeout_ms, max_result);
 }
 
 }

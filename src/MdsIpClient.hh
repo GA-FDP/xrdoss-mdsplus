@@ -1,6 +1,7 @@
 #ifndef FDP_MDSIPCLIENT_HH
 #define FDP_MDSIPCLIENT_HH
 
+#include <cstddef>
 #include <string>
 
 namespace fdp {
@@ -20,7 +21,8 @@ namespace fdp {
 // Thread-safe: holds no connection state, dials per call.
 class MdsIpClient {
 public:
-    MdsIpClient(std::string server, int timeout_ms);
+    // max_result_bytes of 0 disables the cap.
+    MdsIpClient(std::string server, int timeout_ms, size_t max_result_bytes);
 
     // Returns true on success and fills `payload` with serialized result
     // bytes. Returns false and fills `error` otherwise. Never throws -- this
@@ -32,6 +34,7 @@ public:
 private:
     std::string server_;
     int         timeout_ms_;
+    size_t      max_result_bytes_;
 };
 
 }  // namespace fdp

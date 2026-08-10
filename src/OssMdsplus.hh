@@ -23,7 +23,8 @@ namespace fdp {
 class OssMdsplus : public XrdOssWrapper {
 public:
     OssMdsplus(XrdOss &next, XrdSysError &log, const std::string &prefix,
-               const std::string &server, size_t cache_bytes, int timeout_ms);
+               const std::string &server, size_t cache_bytes, int timeout_ms,
+               size_t max_result_bytes);
 
     XrdOssDF *newFile(const char *tident);
     XrdOssDF *newDir(const char *tident);
