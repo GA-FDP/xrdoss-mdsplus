@@ -44,7 +44,7 @@ mkdir -p "$WORK/admin" "$WORK/run" "$EXPORT_DIR/tdi" "$EXPORT_DIR/plain"
 echo hello > "$EXPORT_DIR/plain/hello.txt"
 
 sed -e "s#@@PLUGIN@@#$PLUGIN#" -e "s#@@MDSIP@@#localhost:$MDSIP_PORT#" \
-    -e "s#@@EXPORT@@#$EXPORT_DIR#" -e "s#@@PORT@@#$PORT#" -e "s#@@WORK@@#$WORK#" \
+    -e "s#@@TREES@@#${FDP_TREES:-/tmp/fdp-trees}#" -e "s#@@EXPORT@@#$EXPORT_DIR#" -e "s#@@PORT@@#$PORT#" -e "s#@@WORK@@#$WORK#" \
     "$ROOT/tests/integration/xrootd-test.cfg" > "$CFG"
 
 MDSIP_PID=""; XRD_PID=""
@@ -70,6 +70,7 @@ for _ in $(seq 1 150); do
 done
 
 # Build a path naming a real tree and shot.
+export FDP_TREES="${FDP_TREES:-/tmp/fdp-trees}"
 mkpath() { python "$ROOT/tests/mkpath.py" "$TREE" "$SHOT" "$@"; }
 
 echo "=== comparing against a direct MDSplus read ==="
@@ -130,12 +131,28 @@ for key, expr in (('ip', r'\ipmhd'), ('q95', r'\q95'), ('times', r'dim_of(\ipmhd
 print("OK  all three match a direct read")
 PY
 
+echo "=== a stale version is refused, not served ==="
+# The whole reason versions exist: XrdPfc never revalidates, so an object whose
+# tree has been re-analysed must not keep being served under the old name.
+GOOD=$(mkpath 'r0=\ipmhd')
+STALE=$(echo "$GOOD" | sed -E 's#/v[0-9a-f]{16}/#/vdeadbeefdeadbeef/#')
+[ "$STALE" != "$GOOD" ] || fail "could not construct a stale path"
+if xrdcp -f "root://localhost:$PORT/$STALE" "$WORK/stale.bin" >/dev/null 2>&1; then
+  fail "a stale version should not have been served"
+fi
+echo "OK (refused)"
+
+echo "=== the current version still works after that ==="
+xrdcp -f "root://localhost:$PORT/$GOOD" "$WORK/good.bin" >/dev/null 2>&1 \
+  || fail "current version stopped working"
+echo "OK"
+
 echo "=== a missing shot fails cleanly ==="
 P=$(python - <<'PY'
 import base64, struct
 n, e = b'r0', b'\\ipmhd'
 c = struct.pack('>BH',1,1) + struct.pack('>H',len(n)) + n + struct.pack('>I',len(e)) + e + struct.pack('>B',0)
-print('/tdi/efit01/00/00/99/99/999999/' + base64.urlsafe_b64encode(c).decode().rstrip('='))
+print('/tdi/efit01/00/00/99/99/999999/vdeadbeefdeadbeef/' + base64.urlsafe_b64encode(c).decode().rstrip('='))
 PY
 )
 if xrdcp -f "root://localhost:$PORT/$P" "$WORK/missing.bin" >/dev/null 2>&1; then

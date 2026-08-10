@@ -2,6 +2,7 @@
 #define FDP_OSSMDSPLUS_HH
 
 #include "MdsIpClient.hh"
+#include "TreeVersion.hh"
 #include "ResultCache.hh"
 #include "TdiPath.hh"
 
@@ -24,7 +25,7 @@ class OssMdsplus : public XrdOssWrapper {
 public:
     OssMdsplus(XrdOss &next, XrdSysError &log, const std::string &prefix,
                const std::string &server, size_t cache_bytes, int timeout_ms,
-               size_t max_result_bytes);
+               size_t max_result_bytes, const std::string &treepath);
 
     XrdOssDF *newFile(const char *tident);
     XrdOssDF *newDir(const char *tident);
@@ -41,6 +42,7 @@ private:
     std::string  prefix_;
     MdsIpClient  client_;
     ResultCache  cache_;
+    TreeVersion  versions_;
 };
 
 // File handle for an intercepted path. Owns the wrapped handle: XrdOssWrapDF

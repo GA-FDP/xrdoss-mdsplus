@@ -38,6 +38,7 @@ message(STATUS "XRootD libs:     ${XROOTD_LIB_DIR}")
 add_library(core OBJECT
     src/Base64Url.cc
     src/TdiPath.cc
+    src/TreeVersion.cc
     src/MdsIpClient.cc
     src/ResultCache.cc
 )
@@ -69,7 +70,7 @@ if(BUILD_TESTS)
         message(FATAL_ERROR "doctest not found; add doctest to pixi.toml dependencies")
     endif()
 
-    foreach(t base64url tdipath resultcache)
+    foreach(t base64url tdipath treeversion resultcache)
         add_executable(test_${t} tests/test_${t}.cpp $<TARGET_OBJECTS:core>)
         target_include_directories(test_${t} PRIVATE src ${XROOTD_INCLUDE_DIR}
                                    ${MDSPLUS_INCLUDE_DIR} ${DOCTEST_INCLUDE_DIR})

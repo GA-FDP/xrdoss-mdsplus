@@ -123,10 +123,11 @@ request      apd.List([apd.Dictionary({'name':'ip','exp':'\\ipmhd','args':()})])
 
 base64url    BADWxBAAAAAAAAABBAAAABQ...ANjEEAAAAAAAAAEYAAAAKAAAA...
 
-path         /tdi/efit01/00/00/19/00/190000/BADWxBAAAAAAAAABBAAAABQ...
-                  │      └────────┬───────┘ └──────────┬──────────┘
-                  │               │                    └─ payload, chunked at
-                  │               │                       249 bytes per segment
+path         /tdi/efit01/00/00/19/00/190000/vfe49badc9b703486/BADWxBAA...
+                  │      └────────┬───────┘ └───────┬───────┘ └────┬────┘
+                  │               │                 │              └─ payload,
+                  │               │                 │       chunked at 249 B
+                  │               │                 └─ version (see below)
                   │               └─ shot/100 in digit pairs
                   └─ tree ('-' means: evaluate with no tree open)
 
@@ -139,6 +140,27 @@ The digit-pair bucketing mirrors the existing MDSplus archive layout and keeps
 ~100 shots per directory. It is not decoration: a flat namespace makes XrdPfc's
 startup scan take hours while holding a global lock on open
 ([xrootd#2804](https://github.com/xrootd/xrootd/issues/2804)).
+
+### The version segment
+
+XrdPfc **never revalidates**. Once an object is cached it is served until purged
+for capacity, and Pelican has no per-namespace "do not cache" flag. So without a
+version in the name, a re-analysed shot would be served stale forever.
+
+The token is derived from a `stat` of the tree's `.datafile` — inode, size and
+mtime, hashed — so regenerating the tree changes the object name. Old cache
+entries simply age out, and copies of superseded versions stay *correct*: they
+hold exactly what that version was.
+
+The plugin recomputes the current token on every request and refuses anything
+else, so a stale path cannot be served afresh. It locates the file through
+`treepath=`, a semicolon-delimited list of templates mirroring MDSplus's own
+`<tree>_path` convention (`%T` tree, `%S` shot, `%B` digit-pair bucket) — a list
+because a tree may live under `codes/`, `shots/` or another branch.
+
+**Without `treepath=` the plugin refuses every request that names a tree.**
+Failing closed is deliberate: serving an unverifiable object is exactly the bug
+versioning exists to prevent. Requests naming no tree carry version `-`.
 
 ### Why the path carries everything
 
@@ -174,7 +196,6 @@ This repo currently implements the origin side only. Still to come, in order:
 | Piece | Status |
 |---|---|
 | Sandboxing mdsip | **not built** — TDI can `spawn()`, so this is required before any exposure |
-| Version segment in the path | **not built** — without it a re-analysed shot is served stale forever, because XrdPfc never revalidates |
 | `libMdsIpFDP.so` client transport | not built — lets stock `MDSplus.Connection` use this by changing only its connection string |
 
 Until the first two land, this is a working prototype rather than something to

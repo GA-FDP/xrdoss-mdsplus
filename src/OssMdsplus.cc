@@ -38,9 +38,10 @@ void FillStat(struct stat *buf, size_t size) {
 
 OssMdsplus::OssMdsplus(XrdOss &next, XrdSysError &log, const std::string &prefix,
                        const std::string &server, size_t cache_bytes, int timeout_ms,
-                       size_t max_result_bytes)
+                       size_t max_result_bytes, const std::string &treepath)
     : XrdOssWrapper(next), log_(log), prefix_(prefix),
-      client_(server, timeout_ms, max_result_bytes), cache_(cache_bytes) {}
+      client_(server, timeout_ms, max_result_bytes), cache_(cache_bytes),
+      versions_(treepath) {}
 
 XrdOssDF *OssMdsplus::newFile(const char *tident) {
     std::unique_ptr<XrdOssDF> next(wrapPI.newFile(tident));
@@ -62,6 +63,29 @@ bool OssMdsplus::Materialize(const std::string &lfn, std::string &payload,
     if (!ParseTdiPath(lfn, prefix_, target)) {
         error = "malformed tdi path";
         return false;
+    }
+
+    // A request naming no tree has nothing to version.
+    if (target.tree.empty()) {
+        if (target.version != TreeVersion::kNoVersion) {
+            error = "a request with no tree must carry version '-'";
+            return false;
+        }
+    } else {
+        // Refuse rather than guess when versions cannot be checked: serving an
+        // unverifiable object would let a re-analysed shot be cached forever
+        // under a name that no longer describes it.
+        std::string current;
+        if (!versions_.Current(target.tree, target.shot, current, error)) return false;
+
+        if (target.version != current) {
+            // Not an error in the usual sense -- the caller asked for a
+            // version that is no longer current. Caches holding the older
+            // object are still correct; they hold exactly what that version
+            // was. The client should re-resolve and ask again.
+            error = "stale version " + target.version + "; current is " + current;
+            return false;
+        }
     }
 
     if (!client_.Evaluate(target.tree, target.shot, target.payload, payload, error))
@@ -171,12 +195,19 @@ XrdOss *XrdOssAddStorageSystem2(XrdOss *curr_oss, XrdSysLogger *logger,
     // Bounds origin memory per request; 0 disables. Default 256 MiB.
     const size_t max_result = std::strtoull(
         ParmValue(parms, "maxresult", "268435456").c_str(), 0, 10);
+    // Semicolon-delimited templates for locating a tree's .datafile, used to
+    // derive the version token. %T tree, %S shot, %B digit-pair bucket.
+    const std::string treepath = ParmValue(parms, "treepath", "");
 
     eDest.Say("++++++ XrdOssMdsplus initializing; prefix=", prefix.c_str(),
               " server=", server.c_str());
 
+    if (treepath.empty())
+        eDest.Say("------ XrdOssMdsplus: no treepath= configured; requests naming "
+                  "a tree will be refused because their version cannot be checked");
+
     return new fdp::OssMdsplus(*curr_oss, eDest, prefix, server, cache_bytes,
-                               timeout_ms, max_result);
+                               timeout_ms, max_result, treepath);
 }
 
 }

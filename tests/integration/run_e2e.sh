@@ -23,7 +23,7 @@ mkdir -p "$WORK/admin" "$WORK/run" "$EXPORT_DIR/plain" "$EXPORT_DIR/tdi"
 echo "hello-passthrough" > "$EXPORT_DIR/plain/hello.txt"
 
 sed -e "s#@@PLUGIN@@#$PLUGIN#" -e "s#@@MDSIP@@#localhost:$MDSIP_PORT#" \
-    -e "s#@@EXPORT@@#$EXPORT_DIR#" -e "s#@@PORT@@#$PORT#" -e "s#@@WORK@@#$WORK#" \
+    -e "s#@@TREES@@#${FDP_TREES:-/tmp/fdp-trees}#" -e "s#@@EXPORT@@#$EXPORT_DIR#" -e "s#@@PORT@@#$PORT#" -e "s#@@WORK@@#$WORK#" \
     "$ROOT/tests/integration/xrootd-test.cfg" > "$CFG"
 
 MDSIP_PID=""
@@ -62,6 +62,7 @@ echo "OK"
 
 # '-' is the reserved no-tree segment, so this needs no staged MDSplus data.
 # The payload is MDSplus's own serialised GetMany list (see tests/mkpath.py).
+export FDP_TREES="${FDP_TREES:-/tmp/fdp-trees}"
 mkpath() { python "$ROOT/tests/mkpath.py" - 0 "$@"; }
 
 echo "--- 2. single expression through the plugin ---"

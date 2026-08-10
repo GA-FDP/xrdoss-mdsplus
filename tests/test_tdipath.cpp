@@ -9,7 +9,7 @@ static const char *kPrefix = "/tdi";
 static std::string Payload(const std::string &s) { return s; }
 
 TEST_CASE("round-trips a single expression through a path") {
-    const std::string path = fdp::BuildTdiPath(kPrefix, "efit01", 190000, Payload("\x01\x00\x01 ipmhd"));
+    const std::string path = fdp::BuildTdiPath(kPrefix, "efit01", 190000, "v0123456789abcdef", Payload("\x01\x00\x01 ipmhd"));
     fdp::TdiTarget t;
     REQUIRE(fdp::ParseTdiPath(path, kPrefix, t));
     CHECK(t.tree == "efit01");
@@ -19,7 +19,7 @@ TEST_CASE("round-trips a single expression through a path") {
 
 TEST_CASE("round-trips a payload containing NULs and high bytes") {
     const std::string binary("\x00\x01\xff\x00\xfe", 5);
-    const std::string path = fdp::BuildTdiPath(kPrefix, "efit01", 190000, binary);
+    const std::string path = fdp::BuildTdiPath(kPrefix, "efit01", 190000, "v0123456789abcdef", binary);
     fdp::TdiTarget t;
     REQUIRE(fdp::ParseTdiPath(path, kPrefix, t));
     CHECK(t.payload == binary);
@@ -28,7 +28,7 @@ TEST_CASE("round-trips a payload containing NULs and high bytes") {
 
 TEST_CASE("splits long requests across chunks, none exceeding the name limit") {
     const std::string path =
-        fdp::BuildTdiPath(kPrefix, "efit01", 190000, Payload(std::string(400, 'x')));
+        fdp::BuildTdiPath(kPrefix, "efit01", 190000, "v0123456789abcdef", Payload(std::string(400, 'x')));
     size_t start = 1;
     while (start < path.size()) {
         const size_t end = path.find('/', start);
@@ -45,21 +45,21 @@ TEST_CASE("splits long requests across chunks, none exceeding the name limit") {
 TEST_CASE("rejects a request needing more than kMaxChunks segments") {
     const size_t too_big = fdp::kMaxChunks * fdp::kMaxSegment;  // comfortably over
     const std::string path =
-        fdp::BuildTdiPath(kPrefix, "efit01", 190000, Payload(std::string(too_big, 'x')));
+        fdp::BuildTdiPath(kPrefix, "efit01", 190000, "v0123456789abcdef", Payload(std::string(too_big, 'x')));
     fdp::TdiTarget t;
     CHECK_FALSE(fdp::ParseTdiPath(path, kPrefix, t));
 }
 
 TEST_CASE("is deterministic — equal requests give equal paths") {
-    CHECK(fdp::BuildTdiPath(kPrefix, "efit01", 190000, Payload("\x01\x00\x01 ipmhd")) ==
-          fdp::BuildTdiPath(kPrefix, "efit01", 190000, Payload("\x01\x00\x01 ipmhd")));
+    CHECK(fdp::BuildTdiPath(kPrefix, "efit01", 190000, "v0123456789abcdef", Payload("\x01\x00\x01 ipmhd")) ==
+          fdp::BuildTdiPath(kPrefix, "efit01", 190000, "v0123456789abcdef", Payload("\x01\x00\x01 ipmhd")));
 }
 
 TEST_CASE("paths contain no character the director would mangle") {
     // Verified in tests/fed/FINDINGS.md: '/' inside a segment collapses under
     // the director's path.Clean, and %2F cannot protect it.
     const std::string path =
-        fdp::BuildTdiPath(kPrefix, "efit01", 190000, Payload(std::string("\x00\xff/+=", 5)));
+        fdp::BuildTdiPath(kPrefix, "efit01", 190000, "v0123456789abcdef", Payload(std::string("\x00\xff/+=", 5)));
     size_t start = 1;
     while (start < path.size()) {
         const size_t end = path.find('/', start);
@@ -77,7 +77,7 @@ TEST_CASE("paths contain no character the director would mangle") {
 }
 
 TEST_CASE("the no-tree sentinel round-trips to an empty tree name") {
-    const std::string path = fdp::BuildTdiPath(kPrefix, "", 0, Payload("[1.0,2.0,3.0]"));
+    const std::string path = fdp::BuildTdiPath(kPrefix, "", 0, "v0123456789abcdef", Payload("[1.0,2.0,3.0]"));
     CHECK(path.find(std::string("/") + fdp::kNoTree + "/") != std::string::npos);
 
     fdp::TdiTarget t;
@@ -90,8 +90,24 @@ TEST_CASE("the no-tree sentinel round-trips to an empty tree name") {
 TEST_CASE("a real tree name is not confused with the sentinel") {
     fdp::TdiTarget t;
     REQUIRE(fdp::ParseTdiPath(
-        fdp::BuildTdiPath(kPrefix, "efit01", 190000, Payload("\x01\x00\x01 ipmhd")), kPrefix, t));
+        fdp::BuildTdiPath(kPrefix, "efit01", 190000, "v0123456789abcdef", Payload("\x01\x00\x01 ipmhd")), kPrefix, t));
     CHECK(t.tree == "efit01");
+}
+
+TEST_CASE("the version segment round-trips") {
+    const std::string path =
+        fdp::BuildTdiPath(kPrefix, "efit01", 190000, "vdeadbeef00000001", Payload("x"));
+    CHECK(path.find("/vdeadbeef00000001/") != std::string::npos);
+    fdp::TdiTarget t;
+    REQUIRE(fdp::ParseTdiPath(path, kPrefix, t));
+    CHECK(t.version == "vdeadbeef00000001");
+}
+
+TEST_CASE("rejects a path with no version segment") {
+    // Only 7 components after the prefix: the payload would be read as the
+    // version and there would be nothing left.
+    fdp::TdiTarget t;
+    CHECK_FALSE(fdp::ParseTdiPath("/tdi/efit01/00/00/19/00/190000/QUJD", kPrefix, t));
 }
 
 TEST_CASE("builds the documented bucket layout") {
@@ -102,7 +118,7 @@ TEST_CASE("builds the documented bucket layout") {
 
 TEST_CASE("rejects a bucket that disagrees with the shot") {
     fdp::TdiTarget t;
-    std::string wrong = fdp::BuildTdiPath(kPrefix, "efit01", 190000, Payload("\x01\x00\x01 ipmhd"));
+    std::string wrong = fdp::BuildTdiPath(kPrefix, "efit01", 190000, "v0123456789abcdef", Payload("\x01\x00\x01 ipmhd"));
     const size_t p = wrong.find("/00/00/19/00/");
     REQUIRE(p != std::string::npos);
     wrong.replace(p, 13, "/00/00/19/01/");
@@ -111,15 +127,15 @@ TEST_CASE("rejects a bucket that disagrees with the shot") {
 
 TEST_CASE("rejects malformed paths") {
     fdp::TdiTarget t;
-    CHECK_FALSE(fdp::ParseTdiPath("/tdi/efit01/00/00/19/00/190000", kPrefix, t));   // no payload
+    CHECK_FALSE(fdp::ParseTdiPath("/tdi/efit01/00/00/19/00/190000/v0", kPrefix, t));   // no payload
     CHECK_FALSE(fdp::ParseTdiPath("/tdi/efit01/00/00/19/00/XYZ", kPrefix, t));      // too few parts
-    CHECK_FALSE(fdp::ParseTdiPath("/tdi/efit01/00/00/19/00/abc/XYZ", kPrefix, t));  // bad shot
-    CHECK_FALSE(fdp::ParseTdiPath("/tdi/efit01/00/00/19/00/190000/!!!", kPrefix, t)); // bad base64
+    CHECK_FALSE(fdp::ParseTdiPath("/tdi/efit01/00/00/19/00/abc/v0/XYZ", kPrefix, t));  // bad shot
+    CHECK_FALSE(fdp::ParseTdiPath("/tdi/efit01/00/00/19/00/190000/v0/!!!", kPrefix, t)); // bad base64
     // NB: a payload that decodes but is not a valid MDSplus request is NOT
     // rejected here -- mdsip judges that, and keeping a second opinion about
     // its format is exactly the duplication this design removed.
-    CHECK(fdp::ParseTdiPath("/tdi/efit01/00/00/19/00/190000/QUJD", kPrefix, t));
-    CHECK_FALSE(fdp::ParseTdiPath("/tdi//00/00/19/00/190000/AAAA", kPrefix, t));    // empty tree
+    CHECK(fdp::ParseTdiPath("/tdi/efit01/00/00/19/00/190000/v0/QUJD", kPrefix, t));
+    CHECK_FALSE(fdp::ParseTdiPath("/tdi//00/00/19/00/190000/v0/AAAA", kPrefix, t));    // empty tree
 }
 
 TEST_CASE("declines paths outside the prefix") {
@@ -127,5 +143,5 @@ TEST_CASE("declines paths outside the prefix") {
     CHECK_FALSE(fdp::IsTdiPath("/archives/mdsplus/codes/efit01/x.tree", kPrefix));
     CHECK_FALSE(fdp::ParseTdiPath("/archives/mdsplus/codes/efit01/x.tree", kPrefix, t));
     CHECK_FALSE(fdp::IsTdiPath("/tdifoo/bar", kPrefix));   // prefix must end at a separator
-    CHECK(fdp::IsTdiPath("/tdi/efit01/00/00/19/00/190000/AAAA", kPrefix));
+    CHECK(fdp::IsTdiPath("/tdi/efit01/00/00/19/00/190000/v0/AAAA", kPrefix));
 }

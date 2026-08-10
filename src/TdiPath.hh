@@ -17,6 +17,7 @@ namespace fdp {
 struct TdiTarget {
     std::string tree;
     long long   shot = 0;
+    std::string version;   // token from the path; "-" when no tree is named
     std::string payload;
 };
 
@@ -39,7 +40,8 @@ bool ParseTdiPath(const std::string &lfn, const std::string &prefix, TdiTarget &
 // which is why it must stay byte-for-byte deterministic: the path is the cache
 // key, so any variation is a silent cache miss.
 std::string BuildTdiPath(const std::string &prefix, const std::string &tree,
-                         long long shot, const std::string &payload);
+                         long long shot, const std::string &version,
+                         const std::string &payload);
 
 // The path grammar always carries a tree segment, but some expressions need no
 // tree open at all -- pure computation, or functions like PTDATA2 that take the

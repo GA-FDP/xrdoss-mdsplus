@@ -50,12 +50,14 @@ if ! podman image exists "${FEDBOX_IMAGE:-localhost/fdp-origin-mdsplus:latest}" 
   exit 1
 fi
 
+FEDBOX_EXTRA_MOUNTS="-v ${FDP_TREES:-/tmp/fdp-trees}:/trees:ro,z" \
 bash "$ROOT/tests/fed/fedbox.sh" start \
     "$ROOT/tests/fed/xrootd-tdi.cfg" "$PLUGIN_FILE" >/dev/null \
   || { echo "FAIL: federation did not start"; exit 1; }
 
 # '-' is the reserved no-tree segment, so none of this needs staged MDSplus data.
 # The payload is MDSplus's own serialised GetMany list (see tests/mkpath.py).
+export FDP_TREES="${FDP_TREES:-/tmp/fdp-trees}"
 mkpath() { python "$ROOT/tests/mkpath.py" - 0 "$@"; }
 
 get() {  # get <object-path> <outfile> -> prints HTTP code

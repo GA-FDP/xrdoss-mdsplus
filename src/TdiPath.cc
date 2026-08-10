@@ -52,10 +52,11 @@ bool ParseTdiPath(const std::string &lfn, const std::string &prefix, TdiTarget &
     if (!IsTdiPath(lfn, prefix)) return false;
 
     const std::vector<std::string> p = Split(lfn.substr(prefix.size() + 1), '/');
-    // tree, d1, d2, d3, d4, shot, and at least one payload chunk.
-    if (p.size() < 7) return false;
+    // tree, d1, d2, d3, d4, shot, version, and at least one payload chunk.
+    if (p.size() < 8) return false;
     if (p[0].empty()) return false;
-    if (p.size() - 6 > kMaxChunks) return false;
+    if (p[6].empty()) return false;            // version segment
+    if (p.size() - 7 > kMaxChunks) return false;
 
     for (size_t i = 1; i <= 4; ++i) {
         if (p[i].size() != 2 || !AllDigits(p[i])) return false;
@@ -69,7 +70,7 @@ bool ParseTdiPath(const std::string &lfn, const std::string &prefix, TdiTarget &
     if (ShotBucket(shot) != p[1] + "/" + p[2] + "/" + p[3] + "/" + p[4]) return false;
 
     std::string encoded;
-    for (size_t i = 6; i < p.size(); ++i) {
+    for (size_t i = 7; i < p.size(); ++i) {
         if (p[i].empty() || p[i].size() > kMaxSegment) return false;
         encoded += p[i];
     }
@@ -82,18 +83,21 @@ bool ParseTdiPath(const std::string &lfn, const std::string &prefix, TdiTarget &
     // opening a tree".
     out.tree = (p[0] == kNoTree) ? std::string() : p[0];
     out.shot = shot;
+    out.version = p[6];
     out.payload.swap(raw);
     return true;
 }
 
 std::string BuildTdiPath(const std::string &prefix, const std::string &tree,
-                         long long shot, const std::string &payload) {
+                         long long shot, const std::string &version,
+                         const std::string &payload) {
     const std::string enc = Base64UrlEncode(payload);
     char shotbuf[32];
     std::snprintf(shotbuf, sizeof(shotbuf), "%lld", shot);
 
     const std::string tree_seg = tree.empty() ? std::string(kNoTree) : tree;
-    std::string path = prefix + "/" + tree_seg + "/" + ShotBucket(shot) + "/" + shotbuf;
+    std::string path = prefix + "/" + tree_seg + "/" + ShotBucket(shot) + "/" +
+                       shotbuf + "/" + (version.empty() ? "-" : version);
     for (size_t i = 0; i < enc.size(); i += kMaxSegment) {
         path += "/" + enc.substr(i, kMaxSegment);
     }
