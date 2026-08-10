@@ -1,0 +1,68 @@
+# Build image for libXrdOssMdsplus.
+#
+# Derived from the Pelican origin image so the plugin is compiled against the
+# *exact* libraries it will be loaded next to. That is not fussiness: a
+# conda-built plugin cannot load in the origin image at all, because conda
+# links libxml2.so.16 while AlmaLinux 9 ships libxml2.so.2, and conda's
+# libstdc++ requires GLIBCXX_3.4.30 which the image does not have.
+#
+# The MDSplus static archives are linked in, so the resulting plugin has NO
+# MDSplus runtime dependency and drops into the STOCK origin image unchanged.
+#
+#   podman build -f Containerfile.build -t xrdoss-mdsplus-build .
+#   podman run --rm -v "$PWD/out:/out:z" xrdoss-mdsplus-build
+#
+# Note the MDSplus binary RPMs ship static libraries but no headers at all
+# (mdsplus-devel_bin is 19 files, all .a), so the headers are vendored from
+# upstream source -- see third_party/mdsplus/README.md.
+
+FROM hub.opensciencegrid.org/pelican_platform/origin:latest
+
+ARG MDSPLUS_VERSION=7.158-2
+ARG MDSPLUS_REPO=http://www.mdsplus.org/dist/rhel9/stable/RPMS/x86_64
+
+USER root
+
+RUN dnf -y install gcc-c++ make cmake xrootd-devel zlib-devel libxml2-devel \
+      ${MDSPLUS_REPO}/mdsplus-kernel_bin-${MDSPLUS_VERSION}.el9.x86_64.rpm \
+      ${MDSPLUS_REPO}/mdsplus-devel_bin-${MDSPLUS_VERSION}.el9.x86_64.rpm \
+ && dnf clean all
+
+# Fail early and loudly if the archives we statically link are not where we
+# expect, rather than at link time with a wall of undefined references.
+RUN for a in libMdsIpShr libMdsShr libTdiShr libTreeShr; do \
+      test -f /usr/local/mdsplus/lib64/$a.a || { echo "missing $a.a"; exit 1; }; \
+    done
+
+COPY src /src/src
+COPY third_party /src/third_party
+COPY Containerfile.build /src/
+
+WORKDIR /build
+
+# Built by hand rather than via CMakeLists.txt: that file is set up for the
+# conda dev environment, and this image deliberately has a different layout.
+RUN set -eux; \
+    MDS=/usr/local/mdsplus/lib64; \
+    for f in Base64Url TdiPath MdsIpClient ResultCache OssMdsplus; do \
+      g++ -std=c++14 -O2 -fPIC -c \
+          -I/src/src -I/src/third_party/mdsplus -I/usr/include/xrootd \
+          /src/src/$f.cc -o $f.o; \
+    done; \
+    g++ -shared -o libXrdOssMdsplus-5.so *.o \
+        $MDS/libMdsIpShr.a $MDS/libMdsShr.a $MDS/libTdiShr.a $MDS/libTreeShr.a \
+        $MDS/libMdsIpShr.a $MDS/libMdsShr.a \
+        -lXrdUtils -lz -lxml2
+
+# The point of the exercise: assert the artifact needs nothing from MDSplus at
+# runtime. If this ever fails, the origin image would need an MDSplus install.
+RUN set -eux; \
+    ! objdump -p libXrdOssMdsplus-5.so | grep -E 'NEEDED.*(Mds|Tdi|Tree)'; \
+    objdump -p libXrdOssMdsplus-5.so | grep NEEDED; \
+    nm -D --defined-only libXrdOssMdsplus-5.so | grep -q XrdOssAddStorageSystem2
+
+VOLUME /out
+# The base image sets an ENTRYPOINT of its own; override it or our CMD would be
+# handed to pelican-server as arguments.
+ENTRYPOINT ["/bin/sh", "-c"]
+CMD ["cp /build/libXrdOssMdsplus-5.so /out/ && ls -l /out/libXrdOssMdsplus-5.so"]

@@ -140,3 +140,41 @@ That was wrong. The mdsip *client* code is inside the plugin either way —
 statically welded in rather than loaded as separate `.so` files. Static linking
 buys packaging simplicity, **not** isolation. The isolation argument rests
 entirely on evaluation happening in the mdsip process, which is unchanged.
+
+
+---
+
+# Correction: static linking does NOT remove the MDSplus runtime dependency
+
+The section above concluded that a statically-linked plugin needs nothing from
+MDSplus at runtime, on the evidence that its `DT_NEEDED` list contains no
+MDSplus libraries. **`DT_NEEDED` was the wrong thing to measure.**
+
+`ConnectToMds` calls `LoadIo("tcp")`, which does
+`LibFindImageSymbol_C("MdsIpTCP", "Io")` — it **`dlopen`s `libMdsIpTCP.so` by
+name at runtime** (`mdstcpip/mdsipshr/LoadIo.c:54-62`). A static link cannot
+possibly include a library discovered by filename. When it is absent, `LoadIo`
+silently falls back to `tunnel_routines` and the connect fails with nothing
+more informative than `ConnectToMds(...) failed`.
+
+Confirmed in a real federation: the statically-linked plugin loads cleanly into
+the stock origin image, resolves every symbol, and then cannot connect, because
+the image has no `libMdsIpTCP.so`.
+
+`libMdsIpTCP.so` ships in `mdsplus-kernel_bin`, so **the origin image needs the
+MDSplus runtime installed** regardless of how the plugin is linked. Static
+linking still reduces the reconciliation surface, but it does not eliminate the
+dependency, and the packaging plan must assume a derived *runtime* image.
+
+## Two deployment facts learned the hard way
+
+**`mdsip.hosts` must map to `SELF` when mdsip runs unprivileged.** `MAP_TO_LOCAL`
+makes the server attempt a setuid to the *client's* username — which, when the
+client is XRootD inside the Pelican container, is `xrootd`, an account that does
+not exist on the host. The connection is refused with no server-side log at all.
+`* | SELF` tells mdsip not to switch user (`CheckClient.c:76`). A local test
+where the client happens to run as the same user as the server will pass with
+`MAP_TO_LOCAL` and hide this completely.
+
+**`MDS_PATH` must include `tdi/remote`**, or `GetManyExecute` is not found and
+every request fails with `%TDI-E-UNKNOWN_VAR`.

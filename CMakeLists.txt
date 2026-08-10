@@ -22,12 +22,13 @@ if(NOT XROOTD_LIB_DIR)
 endif()
 # MDSplus: only MdsIpShr, the mdsip protocol client. No object model, no
 # treeshr -- nothing that opens files or evaluates TDI in this process.
-find_path(MDSPLUS_INCLUDE_DIR NAMES mdsdescrip.h
-    HINTS ${CMAKE_PREFIX_PATH}/include $ENV{PREFIX}/include $ENV{CONDA_PREFIX}/include)
+# Headers are vendored: the MDSplus binary RPMs ship none. See
+# third_party/mdsplus/README.md.
+set(MDSPLUS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mdsplus)
 find_path(MDSPLUS_LIB_DIR NAMES libMdsIpShr.so
     HINTS ${CMAKE_PREFIX_PATH}/lib $ENV{PREFIX}/lib $ENV{CONDA_PREFIX}/lib)
-if(NOT MDSPLUS_INCLUDE_DIR OR NOT MDSPLUS_LIB_DIR)
-    message(FATAL_ERROR "MdsIpShr not found (looking for mdsdescrip.h / libMdsIpShr.so)")
+if(NOT MDSPLUS_LIB_DIR)
+    message(FATAL_ERROR "libMdsIpShr.so not found")
 endif()
 message(STATUS "MDSplus includes: ${MDSPLUS_INCLUDE_DIR}")
 message(STATUS "MDSplus libs:     ${MDSPLUS_LIB_DIR}")
