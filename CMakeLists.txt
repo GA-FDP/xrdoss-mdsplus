@@ -57,6 +57,12 @@ target_include_directories(core PUBLIC src ${XROOTD_INCLUDE_DIR} ${MDSPLUS_INCLU
 add_library(relaycore OBJECT src/MdsipSession.cc)
 target_include_directories(relaycore PUBLIC src)
 
+# Client transport: the tunnel's other half.
+find_package(CURL REQUIRED)
+add_library(clientcore OBJECT src/MdsipCall.cc src/HttpTunnel.cc)
+target_include_directories(clientcore PUBLIC src ${MDSPLUS_INCLUDE_DIR})
+target_link_libraries(clientcore PUBLIC CURL::libcurl)
+
 add_library(XrdOssMdsplus MODULE
     src/OssMdsplus.cc
     $<TARGET_OBJECTS:core>
@@ -85,8 +91,25 @@ target_link_libraries(XrdHttpMdsip XrdUtils ${XROOTD_HTTPUTILS_LIB} pthread)
 # version, so configs must reference the UNSUFFIXED name.
 set_target_properties(XrdHttpMdsip PROPERTIES PREFIX "lib" OUTPUT_NAME "XrdHttpMdsip-5")
 
+# The MDSplus thin-client transport. MDSplus's LoadIo() builds the image name
+# "MdsIp" + uppercased scheme and resolves the symbol Io, so scheme fdp:// means
+# this file must be named libMdsIpFDP.so EXACTLY -- no version suffix. That is
+# the opposite of the XRootD plugins above, where XrdOucPinLoader appends one.
+add_library(MdsIpFDP MODULE
+    src/MdsIpFDP.cc
+    $<TARGET_OBJECTS:clientcore>
+)
+target_include_directories(MdsIpFDP PRIVATE src ${MDSPLUS_INCLUDE_DIR})
+target_link_directories(MdsIpFDP PRIVATE ${MDSPLUS_LIB_DIR})
+# MdsIpShr provides ConnectionSetInfo/ConnectionGetInfo. It is always already
+# loaded in the process -- LoadIo() lives in it -- but linking makes the
+# dependency explicit rather than relying on the loader's global scope.
+target_link_libraries(MdsIpFDP CURL::libcurl MdsIpShr)
+set_target_properties(MdsIpFDP PROPERTIES PREFIX "lib" OUTPUT_NAME "MdsIpFDP")
+
 include(GNUInstallDirs)
-install(TARGETS XrdOssMdsplus XrdHttpMdsip LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(TARGETS XrdOssMdsplus XrdHttpMdsip MdsIpFDP
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 option(BUILD_TESTS "Build tests" ON)
 if(BUILD_TESTS)
     enable_testing()
@@ -112,4 +135,15 @@ if(BUILD_TESTS)
     target_include_directories(test_mdsipsession PRIVATE src ${DOCTEST_INCLUDE_DIR})
     target_link_libraries(test_mdsipsession pthread)
     add_test(NAME mdsipsession COMMAND test_mdsipsession)
+
+    # Call framing is the client transport's riskiest logic -- it turns a byte
+    # stream with arbitrary chunking into whole calls -- and needs no server.
+    add_executable(test_mdsipcall tests/test_mdsipcall.cpp src/MdsipCall.cc)
+    target_include_directories(test_mdsipcall PRIVATE src ${DOCTEST_INCLUDE_DIR})
+    add_test(NAME mdsipcall COMMAND test_mdsipcall)
+
+    add_executable(test_httptunnel tests/test_httptunnel.cpp src/HttpTunnel.cc)
+    target_include_directories(test_httptunnel PRIVATE src ${DOCTEST_INCLUDE_DIR})
+    target_link_libraries(test_httptunnel CURL::libcurl)
+    add_test(NAME httptunnel COMMAND test_httptunnel)
 endif()

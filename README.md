@@ -1,17 +1,19 @@
 # xrdoss-mdsplus
 
-Two out-of-tree XRootD plugins that put MDSplus data behind a Pelican origin,
-serving the two kinds of client that exist:
+Out-of-tree plugins that put MDSplus data behind a Pelican origin, serving the
+two kinds of client that exist — plus the client-side transport that reaches
+them:
 
-| Plugin | For | Gets |
+| Component | For | Gets |
 |---|---|---|
 | `libXrdOssMdsplus.so` (`XrdOss`) | path-based clients — `toksearch`, `curl`, `pelicanfs` | **caching**; TDI results as virtual files |
 | `libXrdHttpMdsip.so` (`XrdHttpExtHandler`) | existing thin-client code holding an `MDSplus.Connection` | **full protocol compatibility**; mdsip relayed over the origin's HTTPS port |
+| `libMdsIpFDP.so` (MDSplus transport) | those same thin clients, on the client side | a one-string change: `MDSplus.Connection('fdp://…')` |
 
-Neither evaluates anything itself: both delegate to MDSplus's own `mdsip`
-server, so the first is a path parser and a pipe, and the second is a pipe.
+None of them evaluates anything: all delegate to MDSplus's own `mdsip` server,
+so the first is a path parser and a pipe and the other two are pipes.
 
-Both load into a **stock** Pelican origin — no fork — by pointing
+The two server-side plugins load into a **stock** Pelican origin — no fork — by pointing
 `Xrootd.ConfigFile` at a fragment containing:
 
 ```
@@ -20,8 +22,10 @@ http.exthandler mdsip /path/to/libXrdHttpMdsip.so prefix=/mdsip,host=localhost,p
 ```
 
 Note that neither name in the config carries the **`-5` suffix** the files on
-disk do. XRootD appends the plugin version itself; referencing the suffixed name
-makes it search for `-5-5.so` and only succeed via a fallback.
+disk do: XRootD appends the plugin version itself, and referencing the suffixed
+name makes it search for `-5-5.so` and only succeed via a fallback. The client
+transport is the exact reverse — `libMdsIpFDP.so` must be named precisely that,
+because MDSplus resolves it from the URL scheme.
 
 The rest of this document covers the virtual-file plugin first, since it is
 where the design work is; the relay has its own section further down:
@@ -225,17 +229,22 @@ For those callers there is a second plugin, `libXrdHttpMdsip.so`: an
 existing HTTPS port, TLS and SciTokens.
 
 ```
-  MDSplus.Connection            (stock, unmodified)
-        │  mdsip over TCP
+  MDSplus.Connection('fdp://…')   stock, unmodified
+        │  mdsip over the IoRoutines vtable
         ▼
-  client transport              accumulates one COMPLETE call, POSTs it
+  libMdsIpFDP.so                  accumulates one COMPLETE call, POSTs it
         │  HTTPS
         ▼
-  XRootD :443 ── XrdHttpMdsip   holds one mdsip socket per session
+  XRootD :443 ── XrdHttpMdsip     holds one mdsip socket per session
         │  mdsip over TCP
         ▼
-  mdsip server                  does the actual work
+  mdsip server (sandboxed)        does the actual work
 ```
+
+Both halves are built. Existing thin-client code reaches FDP by changing **one
+string** — `MDSplus.Connection('fdp://d3d-origin.gat.com:8443/mdsip')` — because
+MDSplus loads the transport itself from the URL scheme. See
+[`docs/client-transport.md`](docs/client-transport.md).
 
 Three POSTs make up the whole protocol:
 
@@ -343,9 +352,9 @@ ignores resource limits on cgroups v1 rootless.
 
 | Piece | Status |
 |---|---|
-| `libMdsIpFDP.so` client transport | not built — the tunnel's client half. `tests/integration/mdsip_http_client.py` is a working Python equivalent and deliberately the same shape; see `docs/client-transport.md` |
-| microVM isolation | not built — `/dev/kvm` is available, and it would replace a shared kernel with a virtualised one. A hardening step, not a prerequisite |
+| Federation routing for the relay | **untested** — everything was verified against an origin directly. Whether a `POST` under a namespace prefix routes through the Pelican director the way a `GET` does is open |
 | Tailored seccomp profile | not built — podman's default profile is in force |
+| microVM isolation | not built, and weaker justification since the sandbox moved to its own service account. `/dev/kvm` is available; see the trade-offs in `docs/security.md` |
 
 Deployment also needs ops access, which is the actual gate on going live.
 
@@ -363,7 +372,7 @@ Deployment also needs ops access, which is the actual gate on going live.
 ## Building
 
 ```bash
-pixi run build     # -> build/libXrdOssMdsplus-5.so, build/libXrdHttpMdsip-5.so
+pixi run build     # -> libXrdOssMdsplus-5.so, libXrdHttpMdsip-5.so, libMdsIpFDP.so
 pixi run test      # doctest suites via ctest
 ```
 

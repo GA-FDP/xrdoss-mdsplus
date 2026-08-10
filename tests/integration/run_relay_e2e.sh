@@ -116,4 +116,48 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HTTP_PORT/mdsip
 [ "$CODE" != "200" ] || fail "the relay answered a GET it should have ignored"
 echo "OK ($CODE)"
 
+echo "--- 6. the C transport reaches the relay with no shim in between ---"
+# The real client story: MDSplus loads libMdsIpFDP.so itself, because
+# LibFindImageSymbol_C dlopens "lib" + "MdsIpFDP" + ".so" through the normal
+# loader search. Nothing about the client is modified except the target string.
+TRANSPORT="$ROOT/build/libMdsIpFDP.so"
+if [ ! -f "$TRANSPORT" ]; then
+  echo "SKIP: $TRANSPORT not built"
+else
+  LD_LIBRARY_PATH="$ROOT/build:${LD_LIBRARY_PATH:-}" \
+  FDP_TUNNEL_SCHEME=http \
+  RELAY_TARGET="fdp://127.0.0.1:$HTTP_PORT/mdsip" \
+  RELAY_MDSIP_PORT="$MDSIP_PORT" \
+    python "$ROOT/tests/integration/relay_client_check.py" \
+    || fail "the C transport did not match the direct connection"
+
+  echo "--- 7. transport lifecycle and error paths ---"
+  # mdsip -m forks a process per connection, so a leaked relay session is a
+  # leaked mdsip process. Counting them is the only check here that would
+  # actually notice: the relay's own session cap is 256, so the churn below
+  # would pass just as happily while leaking every one of them.
+  count_mdsip() {
+    if [ -n "${SANDBOXED:-}" ]; then
+      podman exec "$MDSIP_NAME" sh -c 'ls -d /proc/[0-9]* | wc -l' 2>/dev/null || echo 0
+    else
+      pgrep -c -f "mdsip -m -p $MDSIP_PORT" 2>/dev/null || echo 0
+    fi
+  }
+  BEFORE="$(count_mdsip)"
+
+  LD_LIBRARY_PATH="$ROOT/build:${LD_LIBRARY_PATH:-}" \
+  FDP_TUNNEL_SCHEME=http \
+  RELAY_HTTP_PORT="$HTTP_PORT" \
+    python "$ROOT/tests/integration/transport_edge_cases.py" \
+    || fail "transport edge cases failed"
+
+  sleep 2   # let the relay notice the closes
+  AFTER="$(count_mdsip)"
+  echo "  mdsip processes: $BEFORE before, $AFTER after ~50 sessions"
+  # A couple of stragglers are fine (teardown races the count); dozens are not.
+  if [ "$AFTER" -gt "$((BEFORE + 5))" ]; then
+    fail "sessions leaked: $BEFORE -> $AFTER after transport churn"
+  fi
+fi
+
 echo "--- ALL PASS ---"

@@ -13,10 +13,16 @@ import sys
 import numpy as np
 from MDSplus import Connection
 
-SHIM = int(os.environ["RELAY_SHIM_PORT"])
 MDSIP = int(os.environ["RELAY_MDSIP_PORT"])
 SHOT = int(os.environ.get("RELAY_SHOT", "190000"))
 TREE = os.environ.get("RELAY_TREE", "efit01")
+
+# What to compare against the direct connection. Defaults to the Python shim;
+# RELAY_TARGET points it at anything else speaking the same protocol -- notably
+# `fdp://host/prefix`, which exercises the C transport instead.
+TARGET = os.environ.get("RELAY_TARGET")
+if not TARGET:
+    TARGET = "127.0.0.1:%s" % os.environ["RELAY_SHIM_PORT"]
 
 failures = []
 
@@ -28,8 +34,9 @@ def check(name, got, want):
         failures.append(name)
 
 
+print("comparing %s against direct mdsip 127.0.0.1:%d" % (TARGET, MDSIP))
 direct = Connection("127.0.0.1:%d" % MDSIP)
-relayed = Connection("127.0.0.1:%d" % SHIM)
+relayed = Connection(TARGET)
 
 for conn in (direct, relayed):
     conn.openTree(TREE, SHOT)

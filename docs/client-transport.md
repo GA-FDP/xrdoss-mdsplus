@@ -1,87 +1,131 @@
-# `libMdsIpFDP.so` — client transport design
+# `libMdsIpFDP.so` — the MDSplus thin-client transport
 
-**Status:** not built. The premise is verified and the blocker it depended on is
-now cleared, but the work itself is a self-contained piece that deserves its own
-TDD pass rather than being tacked onto the origin work.
+**Status:** built and verified end to end.
 
-## Goal
+## Goal, met
 
-Existing DIII-D code that speaks only the MDSplus thin client should reach FDP
-by changing **one string**:
+Existing DIII-D code that speaks only the MDSplus thin client reaches FDP by
+changing **one string**:
 
 ```python
-conn = MDSplus.Connection('fdp://osg-htc.org/fdp-d3d')   # was 'atlas.gat.com'
+conn = MDSplus.Connection('fdp://d3d-origin.gat.com:8443/mdsip')  # was 'atlas.gat.com'
 conn.openTree('efit01', 190000)
-res = conn.getMany()...execute()
+conn.get(r'\ipmhd')
 ```
 
-## What is already proven
+Nothing else about the client changes. MDSplus loads the library itself:
+`parse_host()` splits `<scheme>://<host>`, and `LoadIo()` uppercases the scheme,
+builds the image name `"MdsIp" + SCHEME`, and resolves the symbol `Io`
+(`mdstcpip/mdsipshr/LoadIo.c:41-62`). `LibFindImageSymbol_C` then `dlopen`s
+`"lib" + "MdsIpFDP" + ".so"` through the normal loader search, with
+`MDSPLUS_LIBRARY_PATH` as a fallback.
 
-**The loading seam needs no MDSplus patch.** `parse_host()`
-(`mdstcpip/mdsipshr/ConnectToMds.c:41`) splits `<scheme>://<host>`, and
-`LoadIo()` (`LoadIo.c:41-62`) uppercases the scheme, builds the image name
-`"MdsIp" + SCHEME`, and resolves symbol `Io` via `LibFindImageSymbol_C`. So
-`fdp://…` loads `libMdsIpFDP.so` exporting `IoRoutines *Io()`. Same
-scheme-to-dlopen idiom as the `TreeFileIo` seam.
+So the file must be named **`libMdsIpFDP.so` exactly** — no version suffix.
+That is the opposite of the XRootD plugins in this repo, where
+`XrdOucPinLoader` appends one and the config must *omit* it.
 
-**The payload needs no translation.** `Connection.getMany()` sends
-`GetManyExecute($)` with a serialized APD list — and that list is **byte-identical**
-to what `tests/mkpath.py` puts in the object path. Verified: both produce the
-same 135 bytes for `{'name':'ip','exp':'\\ipmhd'}`. The transport can lift arg 1
-verbatim and base64url it into the path.
+## What it does
 
-**Version discovery exists.** `GET /tdi-version/<tree>/<bucket>/<shot>` returns
-the current token. `openTree()` is the natural place to call it: once per
-tree-open, after which every expression in that session reuses it.
+`IoRoutines` is a **byte-stream** vtable — `connect`, `send`, `recv`,
+`disconnect` — while an HTTP exchange carries one blob each way. Bridging that
+is the whole job:
 
-## What makes this bigger than it looks
+| Vtable call | What happens |
+|---|---|
+| `connect` | parse `host[:port][/prefix]`, `POST /connect`, keep the session token |
+| `send` | buffer bytes until a **complete call** is assembled, then `POST /msg` and hold the answer |
+| `recv` | drain the held answer |
+| `disconnect` | `POST /close`, free the session |
 
-`IoRoutines` is a **byte-stream** vtable —
+`flush`, `listen`, `authorize`, `reuseCheck` and `check` are NULL. All are
+optional — the in-tree GSI transport leaves four of them NULL the same way.
+`reuseCheck` being NULL is deliberate rather than lazy: connections must never
+be silently shared, because the relay keys server-side state to a session token
+and two callers on one session would interleave into a byte stream that cannot
+survive it.
 
-```c
-int     (*connect)(Connection*, char *protocol, char *connectString);
-ssize_t (*send)(Connection*, const void *buf, size_t len, int nowait);
-ssize_t (*recv)(Connection*, void *buf, size_t len);
-int     (*disconnect)(Connection*);
+**Nothing is interpreted or fabricated.** A real mdsip server behind the relay
+produces every byte returned, which is why `get`, `getMany`, `put`, `setDefault`
+and everything else work without being enumerated anywhere.
+
+## The part that needed care
+
+**Call framing.** `send()` receives whatever chunking MDSplus chose — not one
+message, not one call, and it will split a header mid-field. A call is `nargs`
+messages, each a 48-byte header plus payload, ending at
+`descriptor_idx == nargs - 1`.
+
+`CallAssembler` (`src/MdsipCall.cc`) does only that, and is unit tested without
+a server because it is the piece most likely to harbour a silent off-by-one:
+byte-at-a-time feeding, splits mid-header and mid-payload, a 4 MB call in 8 KB
+chunks, successive calls, and trailing bytes belonging to the next call.
+
+Two traps it exists to avoid:
+
+- **`nargs` is `unsigned char`.** A naive `idx >= nargs - 1` wraps to 255 for a
+  zero-argument call, so the transport waits forever — a hang rather than an
+  error, which is the worst way to be wrong. The comparison is done in `int`.
+- **A message shorter than its own header** would leave the scan offset
+  standing still or running backwards. It is rejected, and the rejection is
+  sticky: a desynchronised stream cannot be resynchronised, and framing the
+  next call from the wrong offset would produce plausible garbage.
+
+Field offsets are `static_assert`ed against a verbatim mirror of `MsgHdr`
+(`mdstcpip/mdsip_connections.h`) rather than trusted, because hand-transcribed
+offsets are exactly how a header gets mis-parsed silently.
+
+## Configuration
+
+| Setting | Where |
+|---|---|
+| Target | the connection string: `fdp://host[:port][/prefix]`, prefix defaulting to `/mdsip` |
+| Bearer token | `BEARER_TOKEN`, then `~/.fdp/token` — the same precedence the `fdp` CLI uses |
+| Scheme | `https` always, unless `FDP_TUNNEL_SCHEME=http` (**test only**, for a local relay with no TLS) |
+
+`https` is the default rather than something the target string can quietly
+downgrade, so an insecure deployment is not the easy mistake. A missing token
+sends no `Authorization` header at all, which is right for an unauthenticated
+local relay and yields a clean 401 against a real origin.
+
+The curl handle is reused for the life of the session, so TLS is negotiated once
+rather than per signal — which matters, because the workload this exists for is
+thousands of one-signal `get()` calls.
+
+## Verified
+
+`pixi run relay-e2e` runs the full chain — stock `MDSplus.Connection` →
+`libMdsIpFDP.so` → XRootD relay → mdsip — and compares every result against the
+same call made directly to mdsip:
+
+```
+\ipmhd, \q95, dim_of(\ipmhd), 10+32, \psirz (4.3 MB), getMany, re-open   all MATCH
 ```
 
-— not a message-level one. To turn `getMany()` into an HTTP GET, the transport
-must therefore **speak the mdsip protocol itself**: accumulate outgoing messages
-(48-byte header plus payload, `nargs` of them) until a call is complete, decide
-what was asked, and then synthesize a well-formed answer message on the way
-back. That is the bulk of the work, and none of it is optional.
+`MDSIP_SANDBOX=1 pixi run relay-e2e` does it against the sandboxed server, which
+is the production topology.
 
-## Suggested shape
+Lifecycle and error paths are covered separately
+(`tests/integration/transport_edge_cases.py`): 25 sequential `get()` on one
+session, state surviving repeated `openTree`, 8 independent connections, 40
+connect/disconnect cycles, errors raising as errors, the session still usable
+afterwards, and an unreachable origin failing rather than hanging.
 
-1. **Message framing** — encode/decode the 48-byte header. Pure logic, unit
-   testable with no server, and the piece most likely to harbour a silent
-   off-by-one. Do it first and fuzz it.
-2. **Call recognition** — buffer args; recognise the two-arg call whose arg 0 is
-   the C string `GetManyExecute($)`, and `MdsOpen` for `openTree`. Anything else
-   returns a clear error rather than misbehaving: `put`, events and `setDefault`
-   are out of scope (spec §1).
-3. **HTTP** — libcurl GET, `Authorization: Bearer` from `BEARER_TOKEN` then
-   `~/.fdp/token`, reusing `fdp`'s existing precedence rather than inventing one.
-4. **Path building** — `BuildTdiPath` already exists in `src/TdiPath.cc` and is
-   deliberately deterministic; link it rather than writing a fourth encoder.
-5. **Answer synthesis** — wrap the fetched bytes in an answer message.
+Session leaks are checked by counting mdsip processes — `mdsip -m` forks per
+connection, so a leaked relay session is a leaked process. Measured 1 before and
+1 after ~50 sessions. This is the only check there that would notice: the
+relay's own session cap is 256, so the churn would pass just as happily while
+leaking every one of them.
 
-## Traps already known
+## Known limits
 
-- **Four implementations of the path grammar** will now exist: C++ plugin,
-  `tests/mkpath.py`, the version resolver in each. They have already drifted
-  once (`tests/fed/FINDINGS.md`). Build shared conformance vectors before adding
-  a fourth.
-- **`getMany` fans into one object, not N** (spec §9.3). A caller expecting one
-  round trip per expression gets one per batch; document it.
-- **Dimensions do not travel with values.** Callers wanting a time base add an
-  explicit `dim_of()` item. This matches `atlas.gat.com`, so it is not a
-  regression, but it will surprise anyone who assumed otherwise.
-- **`ConnectToMds` returns 0 as a valid id**; only `-1` is failure.
-
-## Why not a thinner client instead
-
-A Python client that builds paths and fetches them would be perhaps a hundred
-lines and would unblock `toksearch`'s `MdsSignal` (spec §10) immediately. It
-does nothing for the existing thin-client code, which is the actual motivation,
-but it is worth having and is a much smaller piece of work.
+- **One call in flight per connection.** `MDSplus.Connection` is not concurrent
+  anyway, and the relay answers a second concurrent call on one session with
+  409 rather than interleaving it.
+- **No events.** Async server push cannot cross a request/response tunnel, and
+  `Connection` has no event API regardless.
+- **Sessions are sticky to one origin** and cannot be load balanced — a property
+  of the relay, inherited here.
+- **The federation path is untested.** Everything above was verified against an
+  origin directly. Whether a `POST` under a namespace prefix routes through the
+  Pelican director the way a `GET` does is an open question, and the reason the
+  target string accepts an arbitrary prefix.
