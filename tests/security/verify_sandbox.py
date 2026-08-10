@@ -122,9 +122,19 @@ expect_shell_fails("no DNS resolution", "getent hosts example.com",
 expect_shell_fails("no outbound TCP",
                    "timeout 3 bash -c '</dev/tcp/1.1.1.1/53'",
                    "an internal network with no route off the host")
-expect_shell_fails("cannot reach the host gateway",
-                   "timeout 3 bash -c '</dev/tcp/10.0.2.2/22'",
-                   "the host must not be reachable from the sandbox")
+
+# Backend-independent, and the reason the previous version of this check was
+# worthless: it aimed at 10.0.2.2, the slirp4netns host address, which does not
+# exist on a bridge network -- so it passed without testing anything. A default
+# route is what actually makes egress possible, so assert its absence directly.
+#
+# grep -x on the printed field, not an awk numeric compare: awk converts the
+# subnet route's destination "0A890000" to 0, which would false-match a
+# `$2 == 00000000` test and report a default route that is not there.
+expect_shell_fails("no default route",
+                   "awk '{print $2}' /proc/net/route | grep -qx 00000000",
+                   "an internal network must have no route off the host; if one "
+                   "appears, the egress checks above are passing on luck")
 
 # --- filesystem ---------------------------------------------------------
 expect_shell_fails("root filesystem read-only", "touch /probe-root",

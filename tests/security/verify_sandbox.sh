@@ -33,6 +33,15 @@ fi
 cleanup() { bash "$ROOT/scripts/mdsip-sandbox.sh" stop >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
+# Record the host's container stack in the output. The network controls in
+# particular are properties of the *backend*, not of the flags: podman 5.0
+# removed CNI, so a result obtained under CNI says nothing about a netavark
+# host. A run whose output does not say where it ran is not evidence.
+echo "Container stack:"
+podman info --format '  podman {{.Version.Version}}, network backend {{.Host.NetworkBackend}}, cgroups {{.Host.CgroupsVersion}}, rootless {{.Host.Security.Rootless}}' 2>/dev/null \
+  || echo "  (podman info unavailable)"
+echo
+
 bash "$ROOT/scripts/mdsip-sandbox.sh" start "$TREES"
 
 for _ in $(seq 1 150); do

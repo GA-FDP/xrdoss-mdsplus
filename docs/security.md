@@ -146,6 +146,44 @@ would only prove the flags were typed correctly. On this host, as of
 
 with the two waivers being the resource limits the host cannot enforce.
 
+### That result does not transfer to the origin host
+
+It was obtained on **podman 4.9.4 with the CNI network backend, cgroups v1,
+rootless**. The origin host runs **podman 5.4.0**, and **podman 5.0 removed CNI
+entirely** — so it uses netavark, a backend this result says nothing about. The
+verifier now prints the stack it ran on for exactly this reason: a run whose
+output does not say where it ran is not evidence.
+
+Which findings carry over, and which do not:
+
+| Control | Transfers? |
+|---|---|
+| separate container, read-only root, `:ro` trees, noexec tmpfs, `/run/secrets` masked, `--cap-drop=ALL`, no-new-privileges, non-root uid, own pid namespace | **yes** — none of these depend on the network backend or cgroup version |
+| no DNS, no outbound TCP, no default route | **no** — verified against CNI |
+| pids/memory limits | **no**, and probably *better*: podman 5.4 on a cgroups v2 host enforces what this host silently ignored, so the two waivers should simply disappear |
+
+**The specific thing to check on the origin host is DNS.** On CNI an internal
+network has `dns_enabled: false` outright — that is *why* the "no DNS
+resolution" check passes here. Netavark instead runs aardvark-dns, which lives
+on the host side and can forward queries it does not answer, so names may
+resolve from inside the sandbox even with no route off the host. DNS resolution
+alone is an exfiltration channel; if that check flips to FAIL, the fix is
+`--dns=none` or disabling DNS on the network, not a shrug.
+
+Also worth re-checking there, both cheap:
+
+- **Host reachability.** CNI's internal bridge gets no host-side IP at all
+  (measured: the host was unreachable on a listener bound to `0.0.0.0`).
+  Netavark assigns a gateway address, so "no default route" carries more weight
+  and is worth confirming rather than assuming.
+- **Rootless networking.** podman 5.0 made pasta the default in place of
+  slirp4netns. Named bridge networks like this one should be unaffected, but
+  port publishing is worth confirming works at all.
+
+The action is simply to run `pixi run sandbox-verify` on the origin host before
+deploying. It is written to be run there, and it will answer these questions
+rather than leaving them to inference.
+
 The relay can then be run against the sandbox rather than a bare mdsip — the
 production topology, and the relay is indifferent to which:
 
