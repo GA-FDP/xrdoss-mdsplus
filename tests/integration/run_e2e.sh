@@ -19,7 +19,7 @@ CFG="$WORK/xrootd.cfg"
 [ -f "$PLUGIN_FILE" ] || { echo "FAIL: build the plugin first (pixi run build)"; exit 1; }
 
 rm -rf "$WORK"
-mkdir -p "$WORK/admin" "$WORK/run" "$EXPORT_DIR/plain" "$EXPORT_DIR/tdi"
+mkdir -p "$WORK/admin" "$WORK/run" "$EXPORT_DIR/plain" "$EXPORT_DIR/tdi" "$EXPORT_DIR/tdi-version"
 echo "hello-passthrough" > "$EXPORT_DIR/plain/hello.txt"
 
 sed -e "s#@@PLUGIN@@#$PLUGIN#" -e "s#@@MDSIP@@#localhost:$MDSIP_PORT#" \

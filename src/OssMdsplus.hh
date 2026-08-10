@@ -25,24 +25,33 @@ class OssMdsplus : public XrdOssWrapper {
 public:
     OssMdsplus(XrdOss &next, XrdSysError &log, const std::string &prefix,
                const std::string &server, size_t cache_bytes, int timeout_ms,
-               size_t max_result_bytes, const std::string &treepath);
+               size_t max_result_bytes, const std::string &treepath,
+               const std::string &version_prefix);
 
     XrdOssDF *newFile(const char *tident);
     XrdOssDF *newDir(const char *tident);
     int Stat(const char *path, struct stat *buff, int opts = 0, XrdOucEnv *envP = 0);
 
-    // Evaluate (or return a cached payload) for an intercepted path.
+    // Evaluate (or return a cached payload) for an intercepted path. Handles
+    // both the tdi namespace and the version-lookup namespace.
     bool Materialize(const std::string &lfn, std::string &payload, std::string &error);
 
-    bool Owns(const std::string &lfn) const { return IsTdiPath(lfn, prefix_); }
+    bool Owns(const std::string &lfn) const {
+        return IsTdiPath(lfn, prefix_) || IsTdiPath(lfn, version_prefix_);
+    }
     XrdSysError &Log() { return log_; }
 
 private:
     XrdSysError &log_;
     std::string  prefix_;
+    std::string  version_prefix_;
     MdsIpClient  client_;
     ResultCache  cache_;
     TreeVersion  versions_;
+
+    // Serve the current token for a /tdi-version/<tree>/<bucket>/<shot> lookup.
+    bool ResolveVersionPath(const std::string &lfn, std::string &payload,
+                            std::string &error);
 };
 
 // File handle for an intercepted path. Owns the wrapped handle: XrdOssWrapDF

@@ -13,6 +13,7 @@
 #include <cstring>
 #include <ctime>
 #include <sstream>
+#include <vector>
 
 XrdVERSIONINFO(XrdOssAddStorageSystem2, XrdOssMdsplus);
 
@@ -38,10 +39,50 @@ void FillStat(struct stat *buf, size_t size) {
 
 OssMdsplus::OssMdsplus(XrdOss &next, XrdSysError &log, const std::string &prefix,
                        const std::string &server, size_t cache_bytes, int timeout_ms,
-                       size_t max_result_bytes, const std::string &treepath)
+                       size_t max_result_bytes, const std::string &treepath,
+                       const std::string &version_prefix)
     : XrdOssWrapper(next), log_(log), prefix_(prefix),
+      version_prefix_(version_prefix),
       client_(server, timeout_ms, max_result_bytes), cache_(cache_bytes),
       versions_(treepath) {}
+
+// A remote client cannot derive the version itself -- the token comes from a
+// stat of a tree file it has no access to. So it asks. The answer is small and
+// changes whenever the tree does, which is precisely what must NOT be cached;
+// callers fetch it with ?directread and the origin marks it no-store.
+bool OssMdsplus::ResolveVersionPath(const std::string &lfn, std::string &payload,
+                                    std::string &error) {
+    // <version_prefix>/<tree>/<d1>/<d2>/<d3>/<d4>/<shot>
+    const std::string rest = lfn.substr(version_prefix_.size() + 1);
+    std::vector<std::string> p;
+    size_t start = 0;
+    while (start <= rest.size()) {
+        const size_t end = rest.find('/', start);
+        p.push_back(rest.substr(start, (end == std::string::npos ? rest.size() : end) - start));
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    if (p.size() != 6 || p[0].empty()) { error = "malformed version-lookup path"; return false; }
+
+    for (size_t i = 1; i <= 4; ++i) {
+        if (p[i].size() != 2) { error = "malformed shot bucket"; return false; }
+    }
+    for (size_t i = 0; i < p[5].size(); ++i) {
+        if (p[5][i] < '0' || p[5][i] > '9') { error = "malformed shot"; return false; }
+    }
+    if (p[5].empty()) { error = "malformed shot"; return false; }
+
+    const long long shot = std::strtoll(p[5].c_str(), 0, 10);
+    if (ShotBucket(shot) != p[1] + "/" + p[2] + "/" + p[3] + "/" + p[4]) {
+        error = "shot bucket disagrees with shot";
+        return false;
+    }
+
+    std::string version;
+    if (!versions_.Current(p[0], shot, version, error)) return false;
+    payload = version + "\n";
+    return true;
+}
 
 XrdOssDF *OssMdsplus::newFile(const char *tident) {
     std::unique_ptr<XrdOssDF> next(wrapPI.newFile(tident));
@@ -57,6 +98,11 @@ XrdOssDF *OssMdsplus::newDir(const char *tident) {
 
 bool OssMdsplus::Materialize(const std::string &lfn, std::string &payload,
                              std::string &error) {
+    // Version lookups are deliberately NOT cached: their whole purpose is to
+    // report a value that changes, and a cached answer would defeat that.
+    if (IsTdiPath(lfn, version_prefix_))
+        return ResolveVersionPath(lfn, payload, error);
+
     if (cache_.Get(lfn, payload)) return true;
 
     TdiTarget target;
@@ -198,6 +244,7 @@ XrdOss *XrdOssAddStorageSystem2(XrdOss *curr_oss, XrdSysLogger *logger,
     // Semicolon-delimited templates for locating a tree's .datafile, used to
     // derive the version token. %T tree, %S shot, %B digit-pair bucket.
     const std::string treepath = ParmValue(parms, "treepath", "");
+    const std::string version_prefix = ParmValue(parms, "versionprefix", "/tdi-version");
 
     eDest.Say("++++++ XrdOssMdsplus initializing; prefix=", prefix.c_str(),
               " server=", server.c_str());
@@ -207,7 +254,7 @@ XrdOss *XrdOssAddStorageSystem2(XrdOss *curr_oss, XrdSysLogger *logger,
                   "a tree will be refused because their version cannot be checked");
 
     return new fdp::OssMdsplus(*curr_oss, eDest, prefix, server, cache_bytes,
-                               timeout_ms, max_result, treepath);
+                               timeout_ms, max_result, treepath, version_prefix);
 }
 
 }

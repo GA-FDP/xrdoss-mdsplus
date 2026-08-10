@@ -158,6 +158,18 @@ else, so a stale path cannot be served afresh. It locates the file through
 `<tree>_path` convention (`%T` tree, `%S` shot, `%B` digit-pair bucket) — a list
 because a tree may live under `codes/`, `shots/` or another branch.
 
+A remote client cannot derive the token itself — it has no access to the tree
+files — so it asks:
+
+```
+GET /fdp-d3d/tdi-version/<tree>/<d1>/<d2>/<d3>/<d4>/<shot>   ->  vfe49badc9b703486
+```
+
+That answer is deliberately **not** cached, by us or by anyone: its whole
+purpose is to report a value that changes. Fetch it with `?directread`. The
+natural place to call it is `openTree()`, once per tree-open, after which every
+expression in that session reuses the token.
+
 **Without `treepath=` the plugin refuses every request that names a tree.**
 Failing closed is deliberate: serving an unverifiable object is exactly the bug
 versioning exists to prevent. Requests naming no tree carry version `-`.
@@ -196,7 +208,7 @@ This repo currently implements the origin side only. Still to come, in order:
 | Piece | Status |
 |---|---|
 | Sandboxing mdsip | **not built** — TDI can `spawn()`, so this is required before any exposure |
-| `libMdsIpFDP.so` client transport | not built — lets stock `MDSplus.Connection` use this by changing only its connection string |
+| `libMdsIpFDP.so` client transport | not built — see `docs/client-transport.md` for the design and what is already proven |
 
 Until the first two land, this is a working prototype rather than something to
 deploy.

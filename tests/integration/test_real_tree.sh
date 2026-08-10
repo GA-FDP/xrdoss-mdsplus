@@ -40,7 +40,7 @@ CFG="$WORK/xrootd.cfg"
 export efit01_path="$TREES"
 
 rm -rf "$WORK"
-mkdir -p "$WORK/admin" "$WORK/run" "$EXPORT_DIR/tdi" "$EXPORT_DIR/plain"
+mkdir -p "$WORK/admin" "$WORK/run" "$EXPORT_DIR/tdi" "$EXPORT_DIR/tdi-version" "$EXPORT_DIR/plain"
 echo hello > "$EXPORT_DIR/plain/hello.txt"
 
 sed -e "s#@@PLUGIN@@#$PLUGIN#" -e "s#@@MDSIP@@#localhost:$MDSIP_PORT#" \
@@ -130,6 +130,17 @@ for key, expr in (('ip', r'\ipmhd'), ('q95', r'\q95'), ('times', r'dim_of(\ipmhd
     assert np.array_equal(got, want, equal_nan=True), "%s differs" % key
 print("OK  all three match a direct read")
 PY
+
+echo "=== the version-lookup endpoint agrees with the path builder ==="
+# A remote client cannot stat the tree, so it asks the origin. This endpoint is
+# what the client transport will call at openTree() time.
+VPATH="/tdi-version/$TREE/$(python -c "d='%08d'%($SHOT//100); print('/'.join(d[i:i+2] for i in range(0,8,2)))")/$SHOT"
+xrdcp -f "root://localhost:$PORT/$VPATH" "$WORK/ver.txt" >/dev/null 2>&1 \
+  || fail "version lookup failed for $VPATH"
+SERVED=$(tr -d '\n' < "$WORK/ver.txt")
+EXPECTED=$(mkpath 'r0=1' | sed -E 's#.*/(v[0-9a-f]{16})/.*#\1#')
+[ "$SERVED" = "$EXPECTED" ] || fail "lookup said $SERVED, path builder said $EXPECTED"
+echo "OK ($SERVED)"
 
 echo "=== a stale version is refused, not served ==="
 # The whole reason versions exist: XrdPfc never revalidates, so an object whose
