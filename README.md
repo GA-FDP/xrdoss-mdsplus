@@ -67,9 +67,10 @@ the federation intact (see [Why the path carries everything](#why-the-path-carri
   │   ResultCache           ResultCache.cc   hit? serve it                 │
   │          │ miss                                                        │
   │          ▼                                                             │
-  │   MdsIpClient           MdsIpClient.cc   ConnectToMds / MdsOpen         │
+  │   MdsIpClient           MdsIpClient.cc   ConnectToMds / MdsOpen,        │
+│                                          bounded by a per-request timeout│
   └───────────────────────────────┬────────────────────────────────────────┘
-                                  │  MdsValueDsc(id, "GetManyExecute($)", payload)
+                                  │  SendDsc x2 + GetAnswerInfoTO(timeout)  -> GetManyExecute($)
                                   ▼
   ┌────────────────────────────────────────────────────────────────────────┐
   │ mdsip -m                     (MDSplus's own server, separate process)  │
