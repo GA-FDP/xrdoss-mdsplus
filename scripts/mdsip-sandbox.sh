@@ -22,9 +22,21 @@ TREES="${2:-${FDP_TREES:-/tmp/fdp-trees}}"
 # instead put the origin and mdsip on the internal network and publish nothing.
 PUBLISH="${MDSIP_PUBLISH:-127.0.0.1:8000}"
 
-MEMORY="${MDSIP_MEMORY:-2g}"
-CPUS="${MDSIP_CPUS:-2}"
-PIDS="${MDSIP_PIDS:-256}"
+# These are capacity settings as much as security ones, and both failure
+# directions are real: too high and the limit protects nothing, too low and
+# legitimate load fails in ways that look like bugs rather than limits.
+#
+# The whole container shares one cgroup, so MEMORY is the total across every
+# concurrent connection, not per client. A single \psirz read is a few MB, but
+# a wide getMany over a large tree is not; 8g on a 200 GB origin bounds a
+# runaway while leaving normal work room. Tune it against real load.
+MEMORY="${MDSIP_MEMORY:-8g}"
+CPUS="${MDSIP_CPUS:-8}"
+
+# mdsip -m forks one process per connection, so PIDS is also a cap on
+# CONCURRENT CONNECTIONS. Set it too low and clients get refused under load --
+# a toksearch pipeline with 16 workers is 16 connections by itself.
+PIDS="${MDSIP_PIDS:-512}"
 
 # podman derives several paths from /run/user/$UID, which does not survive the
 # login session that created it. See docs/deployment-notes.md.
@@ -50,28 +62,49 @@ esac
 [ -d "$TREES" ] || { echo "no tree directory at $TREES"; exit 1; }
 TREES="$(readlink -f "$TREES")"
 
-# podman ACCEPTS --pids-limit/--memory/--cpus on a cgroups v1 rootless host and
-# then ignores them, announcing it in one line among its startup noise. A
-# silently absent denial-of-service control is worse than an absent one, so
-# refuse rather than pretend. Rootful podman, or a cgroups v2 host, enforces
-# them normally.
-CGROUPS="$(podman info --format '{{.Host.CgroupsVersion}}' 2>/dev/null || echo unknown)"
-ROOTLESS="$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || echo unknown)"
-if [ "$CGROUPS" = "v1" ] && [ "$ROOTLESS" = "true" ]; then
+# A resource limit is only enforced if its cgroup controller is actually
+# delegated, and podman will accept the flag either way -- on cgroups v1
+# rootless it ignores all of them, announcing it in one line among its startup
+# noise. So ask which controllers exist rather than inferring from the cgroup
+# version: that covers v1 (typically none delegated) and the common v2 rootless
+# case where systemd delegates memory and pids but NOT cpu.
+CONTROLLERS="$(podman info --format '{{range .Host.CgroupControllers}}{{.}} {{end}}' 2>/dev/null || echo '')"
+has_controller() { case " $CONTROLLERS " in *" $1 "*) return 0;; *) return 1;; esac; }
+
+LIMIT_FLAGS=()
+MISSING=""
+if has_controller memory; then LIMIT_FLAGS+=(--memory "$MEMORY"); else MISSING="$MISSING memory"; fi
+if has_controller pids;   then LIMIT_FLAGS+=(--pids-limit "$PIDS"); else MISSING="$MISSING pids"; fi
+# cpu is the one most often left undelegated for rootless users. Its absence is
+# a real but lesser problem -- a client can burn cores, but memory and pids are
+# what bound the catastrophic cases -- so warn rather than refuse.
+if has_controller cpu; then
+  LIMIT_FLAGS+=(--cpus "$CPUS")
+else
+  echo "WARNING: no cpu controller delegated -- --cpus is not enforced." >&2
+  echo "         A client can spin CPU; memory and pids are still bounded." >&2
+  echo "         To fix: systemctl edit user@\$(id -u).service, Delegate=cpu" >&2
+fi
+
+if [ -n "$MISSING" ]; then
   if [ -z "${MDSIP_ALLOW_NO_LIMITS:-}" ]; then
     cat >&2 <<EOF
-REFUSING TO START: this host is cgroups v1 + rootless, where podman silently
-ignores --pids-limit, --memory and --cpus. The sandbox would start with no
-resource limits at all, and a client can call fork() -- see docs/security.md.
+REFUSING TO START: these cgroup controllers are not delegated:$MISSING
+podman accepts the corresponding flags and then ignores them, so the sandbox
+would run without those limits. A client can call fork() -- see docs/security.md.
+
+  host: cgroups $(podman info --format '{{.Host.CgroupsVersion}}' 2>/dev/null), \
+rootless $(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null), \
+controllers $CONTROLLERS
 
 Fix it (best first):
-  * run on a cgroups v2 host
-  * run podman rootful
+  * delegate them (cgroups v2): systemctl edit user@\$(id -u).service, Delegate=memory pids cpu
+  * run on a cgroups v2 host, or run podman rootful
   * accept the risk deliberately:  MDSIP_ALLOW_NO_LIMITS=1 $0 start
 EOF
     exit 1
   fi
-  echo "WARNING: cgroups v1 rootless -- resource limits are NOT enforced" >&2
+  echo "WARNING: no$MISSING limit enforced -- accepted via MDSIP_ALLOW_NO_LIMITS" >&2
 fi
 
 # An "internal" podman network has no route off the host. This is the control
@@ -103,10 +136,17 @@ podman run -d --name "$NAME" \
   --cap-drop=ALL \
   --security-opt=no-new-privileges \
   \
+  `# The sandbox connects to nothing, so it needs no resolver -- and an empty` \
+  `# resolv.conf closes DNS as an exfiltration channel independently of what` \
+  `# the network backend does. Worth doing unconditionally: even on an` \
+  `# --internal CNI network the container is handed the host's nameserver, and` \
+  `# only the missing route stops it being used. netavark's aardvark-dns sits` \
+  `# on the bridge, which an internal network CAN reach.` \
+  --dns=none \
+  \
   `# --- resources: bound a fork bomb and a memory hog ---` \
-  --pids-limit "$PIDS" \
-  --memory "$MEMORY" \
-  --cpus "$CPUS" \
+  `# Only the limits whose controllers are actually delegated; see above.` \
+  "${LIMIT_FLAGS[@]}" \
   \
   `# Trees are read-only above; this tells MDSplus where they are. The path is` \
   `# a template per tree name, matching the origin plugin's treepath.` \

@@ -84,6 +84,7 @@ run.
 |---|---|---|
 | Separate container from the origin | — | reaching issuer keys, tokens, Pelican config |
 | No route off the host | `podman network create --internal` | pivot and exfiltration |
+| No resolver at all | `--dns=none` | DNS as an exfiltration channel, whatever the backend does |
 | Read-only root | `--read-only` | persistence, replacing the server binary |
 | Read-only trees | `-v $TREES:/trees:ro` | tampering with archive data |
 | Writable scratch that cannot execute | `--tmpfs /tmp:noexec,nosuid,nodev` | staging a binary |
@@ -110,10 +111,17 @@ more than the Containerfile puts in it.
 rootless.** podman accepts the flags, prints one line among its startup noise —
 `Resource limits are not supported and ignored on cgroups V1 rootless systems` —
 and runs the container with no limits at all. Since `MdsShr->fork()` works, that
-is the fork-bomb control quietly absent. `mdsip-sandbox.sh` now **refuses to
-start** on such a host unless `MDSIP_ALLOW_NO_LIMITS=1` says the risk is
-accepted deliberately, and the verifier reports those controls as WAIVED rather
-than passing over them.
+is the fork-bomb control quietly absent.
+
+The general rule, which the origin host demonstrates: **a limit is enforced only
+if its controller is delegated**, and podman accepts the flag either way. On
+cgroups v2 rootless, systemd commonly delegates `memory` and `pids` but not
+`cpu` — the origin's controllers are exactly `[memory pids]` — so `--cpus` is
+accepted and ignored there too. `mdsip-sandbox.sh` therefore asks which
+controllers exist, passes only the flags they support, **refuses to start** if
+`memory` or `pids` is missing unless `MDSIP_ALLOW_NO_LIMITS=1` accepts that
+deliberately, and warns about `cpu`. The verifier reports absent limits as
+WAIVED rather than passing over them.
 
 **`mdsplus-kernel_bin` ships no TDI function library.** No `tdi/` directory at
 all, so `GetManyExecute.fun` is absent and every batch request fails with
@@ -146,43 +154,58 @@ would only prove the flags were typed correctly. On this host, as of
 
 with the two waivers being the resource limits the host cannot enforce.
 
-### That result does not transfer to the origin host
+### Where that result was measured, and how the origin differs
 
-It was obtained on **podman 4.9.4 with the CNI network backend, cgroups v1,
-rootless**. The origin host runs **podman 5.4.0**, and **podman 5.0 removed CNI
-entirely** — so it uses netavark, a backend this result says nothing about. The
-verifier now prints the stack it ran on for exactly this reason: a run whose
-output does not say where it ran is not evidence.
-
-Which findings carry over, and which do not:
+It was obtained on **podman 4.9.4 / CNI / cgroups v1 / rootless**. The origin
+(`d3d-origin.gat.com`) is **podman 5.4.0 / netavark 1.14.1 / crun / cgroups v2 /
+rootless, RHEL 9.6**. Podman 5.0 removed CNI entirely, so the network results in
+particular were measured against a backend the origin does not have. The
+verifier prints the stack it ran on for exactly this reason: a run whose output
+does not say where it ran is not evidence.
 
 | Control | Transfers? |
 |---|---|
-| separate container, read-only root, `:ro` trees, noexec tmpfs, `/run/secrets` masked, `--cap-drop=ALL`, no-new-privileges, non-root uid, own pid namespace | **yes** — none of these depend on the network backend or cgroup version |
-| no DNS, no outbound TCP, no default route | **no** — verified against CNI |
-| pids/memory limits | **no**, and probably *better*: podman 5.4 on a cgroups v2 host enforces what this host silently ignored, so the two waivers should simply disappear |
+| separate container, read-only root, `:ro` trees, noexec tmpfs, `/run/secrets` masked, `--cap-drop=ALL`, no-new-privileges, non-root uid, own pid namespace | **yes** — none depend on the network backend or cgroup version |
+| no outbound TCP, no default route | needs re-running, but `--internal` means the same thing to both backends |
+| no DNS | **now closed by construction** — see below |
+| memory and pids limits | **better there**: cgroups v2 with `memory` and `pids` delegated, so the two waivers here become real limits |
+| cpu limit | **not enforced** on the origin: its delegated controllers are `memory` and `pids` only |
 
-**The specific thing to check on the origin host is DNS.** On CNI an internal
-network has `dns_enabled: false` outright — that is *why* the "no DNS
-resolution" check passes here. Netavark instead runs aardvark-dns, which lives
-on the host side and can forward queries it does not answer, so names may
-resolve from inside the sandbox even with no route off the host. DNS resolution
-alone is an exfiltration channel; if that check flips to FAIL, the fix is
-`--dns=none` or disabling DNS on the network, not a shrug.
+**DNS turned out to need fixing, not checking.** The container is handed the
+host's nameserver in `/etc/resolv.conf` *even on an `--internal` CNI network* —
+measured: `nameserver 10.1.1.254`. The "no DNS resolution" check was passing
+only because nothing could route to it, not because DNS was off. Netavark's
+aardvark-dns sits on the bridge, which an internal network **can** reach, so the
+same configuration would likely resolve names on the origin. DNS alone is an
+exfiltration channel.
 
-Also worth re-checking there, both cheap:
+Rather than rely on backend behaviour, the sandbox now passes **`--dns=none`**
+unconditionally: an empty `resolv.conf`, lookups failing immediately, and no
+loss of function because mdsip connects to nothing. Verified not to break the
+service end to end.
+
+**The `cpu` controller is not delegated on the origin** (`cgroupControllers:
+[memory, pids]`), so `--cpus` would be accepted and ignored. The script now
+checks which controllers actually exist and passes only the flags those
+support, warning about `cpu` rather than refusing — memory and pids bound the
+catastrophic cases, while a missing cpu limit means a client can burn cores.
+Fix with `systemctl edit user@$(id -u).service` and `Delegate=memory pids cpu`.
+
+Two things still to confirm there, both cheap and both answered by running the
+verifier:
 
 - **Host reachability.** CNI's internal bridge gets no host-side IP at all
-  (measured: the host was unreachable on a listener bound to `0.0.0.0`).
-  Netavark assigns a gateway address, so "no default route" carries more weight
-  and is worth confirming rather than assuming.
-- **Rootless networking.** podman 5.0 made pasta the default in place of
-  slirp4netns. Named bridge networks like this one should be unaffected, but
-  port publishing is worth confirming works at all.
+  (measured: a host listener on `0.0.0.0` was unreachable from the sandbox).
+  Netavark assigns a gateway address, so that margin should not be assumed.
+- **Rootless networking.** The origin's default rootless mode is pasta, not
+  slirp4netns. Named bridge networks should be unaffected, but confirm port
+  publishing works at all.
 
-The action is simply to run `pixi run sandbox-verify` on the origin host before
-deploying. It is written to be run there, and it will answer these questions
-rather than leaving them to inference.
+**The origin is one host.** mdsip and the Pelican origin would share a kernel
+and a host uid (1122), so "separate container" means separate filesystem and
+credentials — not separate machine. A kernel escape reaches the origin's files
+as that user. That is the strongest argument for the microVM option below, and
+the reason the issuer keys' isolation rests on the kernel holding.
 
 The relay can then be run against the sandbox rather than a bare mdsip — the
 production topology, and the relay is indifferent to which:
