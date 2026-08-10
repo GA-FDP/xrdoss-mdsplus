@@ -291,17 +291,49 @@ The relay links **no MDSplus library at all** (`readelf -d` shows only
 `libXrdUtils`, `libXrdHttpUtils` and libc), speaking mdsip over a plain socket.
 An origin container serving only the tunnel therefore needs no MDSplus runtime.
 
-### Not yet built
+## Sandboxing, which is not optional
 
-Still to come, in order:
+Both plugins end at the same place: a client-supplied TDI expression evaluated
+by an MDSplus server. **That is arbitrary native code execution** — measured,
+not assumed. `MdsShr->system("touch /tmp/x")` creates the file, because
+`image->routine()` is a generic FFI and `dlsym` reaches libc through the
+library's dependency chain. So removing `spawn()` would accomplish nothing, and
+there is no subset of TDI that is both useful and safe.
+
+The security boundary therefore cannot be inside the mdsip process. The
+container is the boundary:
+
+```bash
+pixi run sandbox-build     # -> localhost/fdp-mdsip
+pixi run sandbox-verify    # starts it, attacks it, tears it down
+MDSIP_SANDBOX=1 pixi run relay-e2e   # the relay against the sandbox
+```
+
+`scripts/mdsip-sandbox.sh` runs mdsip in its own container with no route off
+the host, a read-only root, read-only trees, no capabilities, and resource
+limits. It is a **separate container from the origin** — the single most
+important control, because a stolen `issuer.jwk` mints arbitrary federation
+tokens.
+
+`tests/security/verify_sandbox.sh` asserts each control by attacking it through
+ordinary TDI, the same channel a client has. It first confirms the client
+*does* have code execution, so a passing run cannot pass for the wrong reason.
+
+Read [`docs/security.md`](docs/security.md) before deploying either plugin. It
+has the threat model, the measured capabilities, and three findings that
+reading documentation would not have produced — including that podman mounts
+the host's credentials into the container by default, and that it silently
+ignores resource limits on cgroups v1 rootless.
+
+### Not yet built
 
 | Piece | Status |
 |---|---|
-| Sandboxing mdsip | **not built** — TDI can `spawn()`, so this is required before any exposure |
 | `libMdsIpFDP.so` client transport | not built — the tunnel's client half. `tests/integration/mdsip_http_client.py` is a working Python equivalent and deliberately the same shape; see `docs/client-transport.md` |
+| microVM isolation | not built — `/dev/kvm` is available, and it would replace a shared kernel with a virtualised one. A hardening step, not a prerequisite |
+| Tailored seccomp profile | not built — podman's default profile is in force |
 
-Until sandboxing lands, this is a working prototype rather than something to
-deploy.
+Deployment also needs ops access, which is the actual gate on going live.
 
 ## Layout
 
@@ -311,6 +343,8 @@ deploy.
 | `tests/` | doctest unit tests; `mkpath.py` is the Python-side reference implementation of the path grammar |
 | `tests/fed/` | Local Pelican federation in podman — see `tests/fed/FINDINGS.md` |
 | `tests/integration/` | Standalone XRootD end-to-end, for both plugins |
+| `tests/security/` | What a client can do (`probe_capability.py`) and what the sandbox must stop it doing (`verify_sandbox.py`) |
+| `scripts/` | `mdsip-sandbox.sh` — the isolation flags, which are where the containment actually lives |
 
 ## Building
 

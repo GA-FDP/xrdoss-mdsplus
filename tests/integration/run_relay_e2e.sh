@@ -42,9 +42,26 @@ trap cleanup EXIT
 
 fail() { echo "FAIL: $1"; echo "--- xrootd log ---"; tail -40 "$WORK/xrootd.log" 2>/dev/null; exit 1; }
 
-# shellcheck source=../mdsip_helper.sh
-. "$ROOT/tests/mdsip_helper.sh"
-start_mdsip "$MDSIP_PORT" "$TREES" "$WORK"
+# MDSIP_SANDBOX=1 runs the relay against the containerised mdsip instead of a
+# bare one on the host -- the production topology, where a client's code
+# execution lands inside the sandbox rather than on the origin. The relay is
+# indifferent to which it is talking to, which is the point.
+if [ -n "${MDSIP_SANDBOX:-}" ]; then
+  export MDSIP_NAME="${MDSIP_NAME:-fdp-mdsip-relay}"
+  export MDSIP_PUBLISH="127.0.0.1:$MDSIP_PORT"
+  SANDBOXED=1
+  cleanup_sandbox() { bash "$ROOT/scripts/mdsip-sandbox.sh" stop >/dev/null 2>&1 || true; }
+  trap 'cleanup; cleanup_sandbox' EXIT
+  bash "$ROOT/scripts/mdsip-sandbox.sh" start "$TREES"
+  for _ in $(seq 1 150); do
+    (exec 3<>/dev/tcp/127.0.0.1/"$MDSIP_PORT") 2>/dev/null && { exec 3<&- 3>&-; break; }
+    sleep 0.1
+  done
+else
+  # shellcheck source=../mdsip_helper.sh
+  . "$ROOT/tests/mdsip_helper.sh"
+  start_mdsip "$MDSIP_PORT" "$TREES" "$WORK"
+fi
 
 xrootd -c "$CFG" -l "$WORK/xrootd.log" >/dev/null 2>&1 & XRD_PID=$!
 for _ in $(seq 1 150); do

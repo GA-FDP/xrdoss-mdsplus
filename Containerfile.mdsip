@@ -1,0 +1,77 @@
+# The mdsip sandbox: an MDSplus server and nothing else.
+#
+# Evaluating TDI *is* arbitrary native code execution -- measured, not assumed:
+# `MdsShr->system("...")` runs a shell through the FFI, and `MdsShr->fork()`
+# and `MdsShr->getuid()` work too, so removing spawn() would accomplish
+# nothing (tests/security/probe_capability.py, docs/security.md).
+#
+# So this image is built on the assumption that a client already has code
+# execution inside it. Everything here is about what that code can *reach*:
+# it must not reach the origin's issuer keys, the network, or writable trees.
+# The container is the boundary, not the process.
+#
+#   podman build -f Containerfile.mdsip -t fdp-mdsip .
+#
+# Run it with scripts/mdsip-sandbox.sh, which supplies the isolation flags.
+# Building this image without those flags buys nothing.
+
+FROM almalinux:9
+
+ARG MDSPLUS_VERSION=7.158-2
+ARG MDSPLUS_REPO=http://www.mdsplus.org/dist/rhel9/stable/RPMS/x86_64
+ARG MDSPLUS_NOARCH=http://www.mdsplus.org/dist/rhel9/stable/RPMS/noarch
+
+# Two packages, and both are needed. `kernel_bin` is binaries only -- it ships
+# no `tdi/` directory at all -- while the noarch `kernel` carries the TDI
+# function library, including tdi/remote/GetManyExecute.fun. Installing only
+# kernel_bin yields a server that starts, accepts connections, and fails every
+# batch request with %TDI-E-UNKNOWN_VAR.
+#
+# mdsplus-kernel_bin also declares hard dependencies on globus (GSI transport)
+# and freetds (libsybdb, the SQL layer), neither of which is in the base repos.
+# The Pelican origin image happens to carry them already, which is why
+# Containerfile.runtime needs no EPEL and this does.
+RUN dnf -y install epel-release \
+ && dnf -y install \
+      ${MDSPLUS_REPO}/mdsplus-kernel_bin-${MDSPLUS_VERSION}.el9.x86_64.rpm \
+      ${MDSPLUS_NOARCH}/mdsplus-kernel-${MDSPLUS_VERSION}.el9.noarch.rpm \
+ && dnf clean all \
+ && rm -rf /var/cache/dnf
+
+RUN echo /usr/local/mdsplus/lib64 > /etc/ld.so.conf.d/mdsplus.conf && ldconfig
+
+# MAP_TO_LOCAL makes mdsip attempt a setuid to the *client's* username, which
+# fails unprivileged with no server-side log at all. SELF tells it not to switch
+# user -- correct here, since the container already provides the identity
+# boundary and there is nothing to switch to. See docs/deployment-notes.md.
+RUN printf '* | SELF\n' > /etc/mdsip.hosts
+
+# An unprivileged, non-login account owning nothing. Even inside the user
+# namespace, code execution should not land on uid 0.
+RUN useradd --system --no-create-home --shell /sbin/nologin --uid 5000 mdsip
+
+# Strip setuid/setgid bits. --security-opt=no-new-privileges already blocks the
+# escalation, so this is belt and braces -- but the base image ships eight of
+# them (su, mount, gpasswd, ...) and none is reachable by anything this server
+# legitimately does.
+RUN find / -xdev -perm /6000 -type f -exec chmod ug-s {} + 2>/dev/null || true
+
+# GetManyExecute is a TDI function under tdi/remote, not a builtin; without it
+# on MDS_PATH every batch request fails with %TDI-E-UNKNOWN_VAR.
+ENV MDS_PATH=/usr/local/mdsplus/tdi\;/usr/local/mdsplus/tdi/remote
+ENV MDSPLUS_DIR=/usr/local/mdsplus
+
+# Fail the build rather than the deployment if the server or its transport is
+# missing or unresolved.
+RUN set -eux; \
+    test -x /usr/local/mdsplus/bin/mdsip; \
+    test -f /usr/local/mdsplus/lib64/libMdsIpTCP.so; \
+    test -f /usr/local/mdsplus/tdi/remote/GetManyExecute.fun; \
+    ! ldd /usr/local/mdsplus/lib64/libMdsIpShr.so | grep -q "not found"
+
+USER mdsip
+EXPOSE 8000
+
+# -m forks a process per connection, so one client's crash, hang or memory hog
+# is its own. Combined with --pids-limit this is what bounds a fork bomb.
+ENTRYPOINT ["/usr/local/mdsplus/bin/mdsip", "-m", "-p", "8000", "-h", "/etc/mdsip.hosts"]
