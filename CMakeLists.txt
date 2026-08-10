@@ -35,6 +35,14 @@ message(STATUS "MDSplus libs:     ${MDSPLUS_LIB_DIR}")
 message(STATUS "XRootD includes: ${XROOTD_INCLUDE_DIR}")
 message(STATUS "XRootD libs:     ${XROOTD_LIB_DIR}")
 
+# XrdHttpExtHandler.hh ships in neither xrootd-devel nor conda-forge's xrootd;
+# it exists only in the XRootD source tree. See third_party/xrootd/README.md.
+set(XROOTD_VENDORED_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/xrootd)
+find_library(XROOTD_HTTPUTILS_LIB NAMES XrdHttpUtils HINTS ${XROOTD_LIB_DIR})
+if(NOT XROOTD_HTTPUTILS_LIB)
+    message(FATAL_ERROR "libXrdHttpUtils.so not found; it implements XrdHttpExtReq")
+endif()
+
 add_library(core OBJECT
     src/Base64Url.cc
     src/TdiPath.cc
@@ -43,6 +51,11 @@ add_library(core OBJECT
     src/ResultCache.cc
 )
 target_include_directories(core PUBLIC src ${XROOTD_INCLUDE_DIR} ${MDSPLUS_INCLUDE_DIR})
+
+# The relay shares nothing with `core`: it links no MDSplus library at all,
+# speaking mdsip over a plain socket rather than through libMdsIpShr.
+add_library(relaycore OBJECT src/MdsipSession.cc)
+target_include_directories(relaycore PUBLIC src)
 
 add_library(XrdOssMdsplus MODULE
     src/OssMdsplus.cc
@@ -59,8 +72,21 @@ target_link_libraries(XrdOssMdsplus XrdUtils MdsIpShr)
 # via a fallback (observed in Task 0).
 set_target_properties(XrdOssMdsplus PROPERTIES PREFIX "lib" OUTPUT_NAME "XrdOssMdsplus-5")
 
+# The mdsip-over-HTTPS relay: an XrdHttpExtHandler on the origin's own port.
+add_library(XrdHttpMdsip MODULE
+    src/HttpRelay.cc
+    $<TARGET_OBJECTS:relaycore>
+)
+target_include_directories(XrdHttpMdsip PRIVATE src ${XROOTD_INCLUDE_DIR}
+                           ${XROOTD_VENDORED_INCLUDE_DIR})
+target_link_directories(XrdHttpMdsip PRIVATE ${XROOTD_LIB_DIR})
+target_link_libraries(XrdHttpMdsip XrdUtils ${XROOTD_HTTPUTILS_LIB} pthread)
+# Same -5 suffix rule as the osslib above: XrdOucPinLoader appends the plugin
+# version, so configs must reference the UNSUFFIXED name.
+set_target_properties(XrdHttpMdsip PROPERTIES PREFIX "lib" OUTPUT_NAME "XrdHttpMdsip-5")
+
 include(GNUInstallDirs)
-install(TARGETS XrdOssMdsplus LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(TARGETS XrdOssMdsplus XrdHttpMdsip LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 option(BUILD_TESTS "Build tests" ON)
 if(BUILD_TESTS)
     enable_testing()
@@ -79,4 +105,11 @@ if(BUILD_TESTS)
         target_link_libraries(test_${t} pthread)
         add_test(NAME ${t} COMMAND test_${t})
     endforeach()
+
+    # Links relaycore, not core: no MDSplus anywhere in the relay path.
+    add_executable(test_mdsipsession tests/test_mdsipsession.cpp
+                   $<TARGET_OBJECTS:relaycore>)
+    target_include_directories(test_mdsipsession PRIVATE src ${DOCTEST_INCLUDE_DIR})
+    target_link_libraries(test_mdsipsession pthread)
+    add_test(NAME mdsipsession COMMAND test_mdsipsession)
 endif()

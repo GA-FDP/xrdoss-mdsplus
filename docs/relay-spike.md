@@ -3,6 +3,10 @@
 **Date:** 2026-08-10 · **Result:** the model works; session affinity is
 mandatory · **Code:** [`spikes/relay_spike.py`](spikes/relay_spike.py)
 
+> **Since superseded by the real thing.** The handler this spike justified is
+> built (`src/HttpRelay.cc`); see [The XRootD side](#the-xrootd-side--now-built).
+> This document is kept for the reasoning, not as current status.
+
 ## The question
 
 A translating transport — one that turns `conn.get()` into a cacheable object
@@ -73,9 +77,25 @@ That is real complexity, but bounded and well-precedented: MDSplus's own (now
 bit-rotted) `http://` transport did exactly this, keeping session state in a
 per-connection temp directory.
 
-## The XRootD side
+## The XRootD side — now built
 
-`XrdHttpExtHandler` is a clean fit:
+`src/HttpRelay.cc` + `src/MdsipSession.cc`, built as `libXrdHttpMdsip-5.so` and
+exercised by `pixi run relay-e2e`, which runs a stock `MDSplus.Connection`
+through it and compares every result against the same call made straight to
+mdsip. `\ipmhd`, `\q95`, `dim_of(...)`, arithmetic, `\psirz` (4.3 MB),
+`getMany`, an in-band error, and a re-open all match exactly.
+
+Three things the XRootD source settled that the spike could not:
+
+- **`http.exthandler` parms are one `GetWord()` token** — no spaces, despite the
+  directive's docs calling it "a free string". Comma is the usable separator.
+- **`BuffgetData` returns 0 for "buffer full"** as well as for a dead
+  connection, if asked for more than the 1 MB HTTP read buffer can supply. The
+  body reader stays at 64 KB per call so 0 means what it looks like.
+- **`+notls`** loads a handler before TLS is configured, which is what makes a
+  plain-HTTP test harness possible.
+
+`XrdHttpExtHandler` was a clean fit:
 
 ```cpp
 virtual bool MatchesPath(const char *verb, const char *path) = 0;
@@ -103,7 +123,7 @@ the XRootD version if we depend on it.
 | `put`, events, `setDefault` | unsupported | free |
 | reply fabrication | every reply | none |
 | federation caching | **yes** | **no** |
-| server side | already built | ext handler, unbuilt |
+| server side | already built | ext handler, **now built** |
 | client side | ~several hundred lines, delicate | ~150 lines, dumb |
 
 Caching is the whole trade. It cannot be recovered in a tunnel: a cache keys on

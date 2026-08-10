@@ -1,19 +1,31 @@
 # xrdoss-mdsplus
 
-An out-of-tree XRootD `XrdOss` plugin that serves MDSplus TDI evaluation results
-as virtual files. Evaluation is delegated to MDSplus's own `mdsip` server via
-`GetManyExecute($)`, so the plugin itself is a path parser and a pipe.
+Two out-of-tree XRootD plugins that put MDSplus data behind a Pelican origin,
+serving the two kinds of client that exist:
 
-Loaded into a **stock** Pelican origin — no fork — by pointing
+| Plugin | For | Gets |
+|---|---|---|
+| `libXrdOssMdsplus.so` (`XrdOss`) | path-based clients — `toksearch`, `curl`, `pelicanfs` | **caching**; TDI results as virtual files |
+| `libXrdHttpMdsip.so` (`XrdHttpExtHandler`) | existing thin-client code holding an `MDSplus.Connection` | **full protocol compatibility**; mdsip relayed over the origin's HTTPS port |
+
+Neither evaluates anything itself: both delegate to MDSplus's own `mdsip`
+server, so the first is a path parser and a pipe, and the second is a pipe.
+
+Both load into a **stock** Pelican origin — no fork — by pointing
 `Xrootd.ConfigFile` at a fragment containing:
 
 ```
 ofs.osslib ++ /path/to/libXrdOssMdsplus.so prefix=/tdi server=localhost:8000
+http.exthandler mdsip /path/to/libXrdHttpMdsip.so prefix=/mdsip,host=localhost,port=8000
 ```
 
-Note the name in the config has **no `-5` suffix** even though the file on disk
-is `libXrdOssMdsplus-5.so`. XRootD appends the plugin version itself; referencing
-the suffixed name makes it search for `-5-5.so` and only succeed via a fallback.
+Note that neither name in the config carries the **`-5` suffix** the files on
+disk do. XRootD appends the plugin version itself; referencing the suffixed name
+makes it search for `-5-5.so` and only succeed via a fallback.
+
+The rest of this document covers the virtual-file plugin first, since it is
+where the design work is; the relay has its own section further down:
+[The other half](#the-other-half-mdsip-tunnelled-over-the-same-port).
 
 ## How a request flows
 
@@ -201,40 +213,123 @@ Two things that used to be required here are no longer: wrapping expressions in
 for a bespoke evaluator that no longer exists — mdsip returns unwrapped nodes
 correctly and gives each connection its own process. See `docs/mdsip-spike.md`.
 
+## The other half: mdsip tunnelled over the same port
+
+Everything above serves *path-based* clients — callers who can be told to batch,
+and therefore the ones caching pays for. But most existing DIII-D code is not
+that. It holds an `MDSplus.Connection` and calls `conn.get()` one signal at a
+time (55 such call sites in the local repos, against 0 for `getMany`).
+
+For those callers there is a second plugin, `libXrdHttpMdsip.so`: an
+`XrdHttpExtHandler` that **relays the mdsip protocol** over the origin's
+existing HTTPS port, TLS and SciTokens.
+
+```
+  MDSplus.Connection            (stock, unmodified)
+        │  mdsip over TCP
+        ▼
+  client transport              accumulates one COMPLETE call, POSTs it
+        │  HTTPS
+        ▼
+  XRootD :443 ── XrdHttpMdsip   holds one mdsip socket per session
+        │  mdsip over TCP
+        ▼
+  mdsip server                  does the actual work
+```
+
+Three POSTs make up the whole protocol:
+
+| Request | Body up | Body down |
+|---|---|---|
+| `POST <prefix>/connect` | — | an opaque session token |
+| `POST <prefix>/msg` + `X-Fdp-Session` | one complete mdsip call | exactly one mdsip answer |
+| `POST <prefix>/close` + `X-Fdp-Session` | — | — |
+
+Loaded alongside the osslib, again with the **unsuffixed** name:
+
+```
+http.exthandler mdsip /path/to/libXrdHttpMdsip.so prefix=/mdsip,host=localhost,port=8000
+```
+
+Parms are a single `XrdOucStream::GetWord()` token, so they **cannot contain
+spaces** — comma is the separator. Add `+notls` before the library path only
+when running without TLS, as the test harness does.
+
+### What the tunnel buys and what it costs
+
+Full protocol compatibility, for free: `get`, `getMany`, `put`, `setDefault`,
+anything — because a real mdsip server handles it, and the semantics match
+`atlas.gat.com` because they *are* `atlas.gat.com`'s, relayed. There is no
+reply fabrication anywhere, so there is no class of bug where a mistake yields
+plausible wrong data instead of an error.
+
+The cost is caching, and it cannot be recovered: a cache keys on a URL, and a
+tunnel has none. Moving the intelligence to the origin does not help either,
+because the request that crossed the network was still a POST. The two plugins
+are complementary rather than competing — see [`docs/relay-spike.md`](docs/relay-spike.md).
+
+### Sessions, and why they are mandatory
+
+**mdsip is stateful.** `openTree` sets the tree context *on the connection*, so
+a relay that opened a fresh mdsip connection per HTTP request loses it and every
+subsequent `get()` fails. A stateless variant was tried and dies immediately
+with `%MDSPLUS-E-ERROR`.
+
+So the handler holds one mdsip socket per session, which has consequences worth
+stating plainly:
+
+- sessions are **sticky to one origin** and cannot be load-balanced
+- an abandoned session holds an mdsip connection until the idle reaper takes it
+  (`idle=`, default 300s), and `maxsessions=` bounds the damage from a flood
+- one call at a time per session; a concurrent second call gets `409` rather
+  than being interleaved into the byte stream, which would corrupt it
+- a broken stream retires the session instead of resynchronising — a half-written
+  call cannot be recovered from, and the alternative is handing the next caller
+  misaligned bytes
+
+The relay links **no MDSplus library at all** (`readelf -d` shows only
+`libXrdUtils`, `libXrdHttpUtils` and libc), speaking mdsip over a plain socket.
+An origin container serving only the tunnel therefore needs no MDSplus runtime.
+
 ### Not yet built
 
-This repo currently implements the origin side only. Still to come, in order:
+Still to come, in order:
 
 | Piece | Status |
 |---|---|
 | Sandboxing mdsip | **not built** — TDI can `spawn()`, so this is required before any exposure |
-| `libMdsIpFDP.so` client transport | not built — see `docs/client-transport.md` for the design and what is already proven |
+| `libMdsIpFDP.so` client transport | not built — the tunnel's client half. `tests/integration/mdsip_http_client.py` is a working Python equivalent and deliberately the same shape; see `docs/client-transport.md` |
 
-Until the first two land, this is a working prototype rather than something to
+Until sandboxing lands, this is a working prototype rather than something to
 deploy.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `src/` | The plugin. Logic lives in small units (`Base64Url`, `TdiPath`, `MdsIpClient`, `ResultCache`); `OssMdsplus.cc` is thin wiring over them. |
+| `src/` | Both plugins. The osslib's logic lives in small units (`Base64Url`, `TdiPath`, `MdsIpClient`, `ResultCache`) with `OssMdsplus.cc` thin wiring over them; the relay is `HttpRelay.cc` over `MdsipSession.cc`. The two share no code. |
 | `tests/` | doctest unit tests; `mkpath.py` is the Python-side reference implementation of the path grammar |
 | `tests/fed/` | Local Pelican federation in podman — see `tests/fed/FINDINGS.md` |
-| `tests/integration/` | Standalone XRootD end-to-end |
+| `tests/integration/` | Standalone XRootD end-to-end, for both plugins |
 
 ## Building
 
 ```bash
-pixi run build     # -> build/libXrdOssMdsplus-5.so
+pixi run build     # -> build/libXrdOssMdsplus-5.so, build/libXrdHttpMdsip-5.so
 pixi run test      # doctest suites via ctest
 ```
 
-End-to-end (starts mdsip and a standalone XRootD for you):
+End-to-end (each starts mdsip and a standalone XRootD for you):
 
 ```bash
-pixi run bash tests/integration/run_e2e.sh        # ~1s, no container
+pixi run e2e                                      # virtual files, ~1s, no container
+pixi run relay-e2e                                # the tunnel, with a stock MDSplus.Connection
 pixi run bash tests/integration/test_real_tree.sh # needs a staged tree
 ```
+
+`relay-e2e` is the one that proves the tunnel: it runs a real
+`MDSplus.Connection` through the handler and compares every result against the
+same call made straight to mdsip. Anything short of exact agreement fails.
 
 XRootD is pinned `<6` to match the deployed v5 plugin chain. The Pelican origin
 image ships XRootD v5.9.2 and the pixi environment resolves to the same version,

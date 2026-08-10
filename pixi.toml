@@ -23,4 +23,6 @@ configure = "cmake -S . -B build -DCMAKE_PREFIX_PATH=$CONDA_PREFIX"
 build = { cmd = "cmake --build build -j", depends-on = ["configure"] }
 test = { cmd = "cd build && ctest --output-on-failure", depends-on = ["build"] }
 pytest = "python -m pytest tests -v"
+e2e = { cmd = "bash tests/integration/run_e2e.sh", depends-on = ["build"] }
+relay-e2e = { cmd = "bash tests/integration/run_relay_e2e.sh", depends-on = ["build"] }
 clean = "rm -rf build"
