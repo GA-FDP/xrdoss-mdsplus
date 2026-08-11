@@ -1,12 +1,13 @@
 # Security: what this service actually exposes
 
-**Date:** 2026-08-10 · **Status:** sandbox built and verified; not yet deployed
+**Date:** 2026-08-11 · **Status:** sandbox and authorization built and verified; not yet deployed
 
 Both plugins in this repo end at the same place: a client-supplied TDI
 expression evaluated by an MDSplus server. This document records what that
 means, measured rather than assumed, and what the sandbox does about it.
 
 ## The finding: TDI evaluation is arbitrary native code execution
+
 
 Not "could be under some circumstances" — is, today, through documented
 features, with no exploit involved. Measured against a stock mdsip by
@@ -41,6 +42,7 @@ boundary.**
 
 ## Threat model
 
+
 **Attacker:** any holder of a valid FDP token. Per the operating assumption for
 this phase, that is anyone who can read `/fdp-d3d/archives` — every token holder,
 read-only. There is no privileged subset to protect data *from*.
@@ -73,6 +75,7 @@ is sufficient. If per-user data rights are ever introduced, that conclusion
 changes and the design has to change with it.
 
 ## The sandbox
+
 
 [`Containerfile.mdsip`](../Containerfile.mdsip) builds an image containing an
 MDSplus server and nothing else;
@@ -132,6 +135,7 @@ both, and the build asserts the file exists rather than discovering it in
 production.
 
 ## Verifying it
+
 
 A sandbox nobody attacks is indistinguishable from no sandbox at all, so the
 controls are asserted by attacking them through ordinary TDI — the same channel
@@ -202,7 +206,81 @@ verifier:
   slirp4netns. Named bridge networks should be unaffected, but confirm port
   publishing works at all.
 
+## Authorization: delegated to XRootD
+
+
+An `XrdHttpExtHandler` runs **before** XRootD's authorization.
+`XrdHttpReq.cc:990` dispatches at `reqstate == 0`, ahead of the file-access path
+where `ofs.authorize` and the SciTokens plugin live, so nothing an ext handler
+serves is authorized *automatically*. That was measured the hard way: with the
+handler claiming the path, `PUT /mdsip/connect` returned **200** with no
+credentials and with a garbage bearer token, while the same unauthenticated PUT
+to a path the handler did *not* claim returned **403**.
+
+**But the framework hands the handler what it needs to authorize itself**, and
+there is an in-tree pattern for it. `XrdHttpTPC` takes the `Authorization`
+header, encodes it as an `authz=` opaque, and asks the SFS layer to act on the
+path with the caller's `XrdSecEntity` (`XrdHttpTpcTPC.cc:827-830`); OFS then
+runs the site's configured policy. The filesystem object arrives via the
+`XrdOucEnv *` passed to `XrdHttpGetExtHandler`
+(`XrdXrootdConfig.cc:306` → `XrdHttpTpcConfigure.cc:131`).
+
+So the relay does the same: on `/connect` it stats a configured path with the
+caller's identity and token, and refuses the session with **401** unless XRootD
+says yes. There is no second token implementation to keep in step — the relay is
+protected by exactly whatever already protects the rest of the origin.
+
+```
+http.exthandler mdsip /path/to/libXrdHttpMdsip.so \
+    prefix=/mdsip,host=localhost,port=8000,auth=xrootd,authpath=/fdp-d3d/archives
+```
+
+| Parm | Meaning |
+|---|---|
+| `auth=xrootd` | delegate to this origin's authorization (**use this**) |
+| `auth=none` | no check at all; for a trusted network, logs a prominent warning |
+| `authpath=` | the path whose policy gates a session; defaults to `prefix` |
+
+The handler **refuses to load** if `auth` is absent or unrecognised, so the
+unauthenticated state cannot be reached by forgetting something. When it
+refuses, the endpoint falls back to normal XRootD handling — measured `PUT` →
+403, `POST` → 501 — so no open relay endpoint exists either way.
+
+### Verified in both directions
+
+A control that can only deny is as broken as one that can only allow, so the
+federation test drives both, using namespace policy as the only lever (no token
+minting required):
+
+| Endpoint | Namespace policy | Result |
+|---|---|---|
+| `/mdsip/connect` | `PublicReads` | **200** — allows when the policy allows |
+| `/mdsip-private/connect` | no `PublicReads` | **401** — denies when the policy denies |
+| `/mdsip-private/connect` + garbage token | no `PublicReads` | **401** |
+| `/tdi/...` (not claimed by the relay) | — | **403** — the yardstick, XRootD unaided |
+
+### Two things to know
+
+**`authpath` should name the path whose token scope you actually mean.** It
+defaults to the handler's own prefix, which is only right if tokens are issued
+for that namespace. Pointing it at the archive prefix clients already hold
+tokens for (`/fdp-d3d/archives`) is usually what you want.
+
+**Delegation is exactly as strong as the origin's configuration.** The
+`AUTHORIZE` macro is `if (usr && XrdOfsFS->Authorization && !Access(...))` — so
+on an origin with no authorization configured, it permits everything, silently.
+That is true of every other path on such an origin too, but it means
+`auth=xrootd` is a delegation rather than a guarantee. The `/tdi/...` → 403 line
+above is what confirms the policy is live.
+
+**A session is authorized once, at `/connect`.** Later calls present the
+128-bit session token instead, so a session can outlive the bearer token that
+opened it, bounded by the idle reaper (`idle=`, default 300s). Deliberate:
+re-authorizing every call would add a round trip to a workload that is thousands
+of one-signal `get()` calls.
+
 ## Run it as a dedicated service account
+
 
 **Rootless podman maps container uid 0 to the invoking user.** Measured on a
 running sandbox:
@@ -287,6 +365,7 @@ MDSIP_SANDBOX=1 pixi run relay-e2e
 
 ## What is still open
 
+
 **The kernel is the remaining boundary.** Everything above is namespaces,
 cgroups and seccomp; a kernel exploit defeats all of it at once. `/dev/kvm` is
 present on this host (`crw-rw-rw-`), so a microVM runtime — Kata, or Firecracker
@@ -305,44 +384,7 @@ else — there is no per-token quota or fair sharing, and adding one means the
 relay tracking usage per session.
 
 **The relay is what makes this reachable.** `libXrdHttpMdsip.so` deliberately
-forwards anything a client sends, so the sandbox is the *only* control between a
-token holder and code execution. Do not deploy the relay against an unsandboxed
+forwards anything a client sends, so behind `auth=xrootd` the sandbox is the
+second control rather than the only one — but it is still what stands between an
+*authorized* client and the host. Do not deploy the relay against an unsandboxed
 mdsip, including "temporarily" for testing against production trees.
-
-## Blocker: the relay authenticates nobody
-
-An `XrdHttpExtHandler` runs **before** XRootD's authorization.
-`XrdHttpReq.cc:990` dispatches at `reqstate == 0`, ahead of the file-access path
-where `ofs.authorize` and the SciTokens plugin live, so nothing the relay serves
-is authenticated by XRootD. Measured against a TLS-configured federation origin
-(`tests/fed/probe_federation_post.sh`):
-
-| Request | Result |
-|---|---|
-| `PUT /mdsip/connect`, no credentials at all | **200** |
-| `PUT /mdsip/connect`, garbage bearer token | **200** |
-| `PUT /tdi/...` (a path the relay does *not* claim), no credentials | **403** ← contrast |
-
-The contrast is the finding: the *same* unauthenticated request was 403 before
-the handler claimed PUT and 200 after. XRootD was enforcing authorization until
-the ext handler took that path away from it.
-
-Combined with the top of this document — a session is arbitrary code execution —
-this means **anyone who can reach the origin's HTTPS port could run code on the
-mdsip host**, with the sandbox as the only thing standing in the way. The
-sandbox is genuinely good, but it was designed assuming the attacker is a *token
-holder*, and this makes it the whole perimeter rather than the second layer.
-
-**What is done about it now:** the handler **refuses to load** unless an
-explicit `auth=` parm is set. When refused, the endpoint falls back to normal
-XRootD handling — measured `PUT` → 403, `POST` → 501 — so no unauthenticated
-relay endpoint exists. `auth=none` is the only value supported today; it loads
-the handler and logs a prominent warning.
-
-**What is not done:** token validation. `auth=none` is honest, not safe. Before
-the relay faces anything but a trusted network it needs to verify the bearer
-token itself, since XRootD will not do it. The likely shape is validating the
-SciToken against the federation issuer and checking that its scope covers the
-namespace — the same check the storage path would have applied. Until then, the
-relay belongs on a trusted network only, and the fact that it works is not
-evidence that it is safe to expose.

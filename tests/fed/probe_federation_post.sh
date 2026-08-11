@@ -152,26 +152,42 @@ else
 fi
 
 echo
-echo "=== AUTHORIZATION: does the ext handler bypass it? ==="
+echo "=== AUTHORIZATION delegated to XRootD (auth=xrootd) ==="
+# Both directions, using namespace policy as the only lever -- no token minting.
+# A control that can only deny is as broken as one that can only allow, so the
+# public namespace must still let an anonymous caller through.
+if [ -n "$ORIGIN_PORT" ]; then
+  PUB=$(curl -ks -o /dev/null -w '%{http_code}' -X PUT --data-binary '' \
+        "https://localhost:$ORIGIN_PORT/mdsip/connect")
+  PRIV=$(curl -ks -o /dev/null -w '%{http_code}' -X PUT --data-binary '' \
+         "https://localhost:$ORIGIN_PORT/mdsip-private/connect")
+  PRIVJUNK=$(curl -ks -o /dev/null -w '%{http_code}' -X PUT --data-binary '' \
+             -H 'Authorization: Bearer not-a-real-token' \
+             "https://localhost:$ORIGIN_PORT/mdsip-private/connect")
+  echo "  /mdsip/connect         (policy: PublicReads)   : $PUB      expect 200"
+  echo "  /mdsip-private/connect (policy: no PublicReads): $PRIV      expect 401"
+  echo "  /mdsip-private/connect with a garbage token    : $PRIVJUNK      expect 401"
+  if [ "$PUB" = "200" ] && [ "$PRIV" = "401" ] && [ "$PRIVJUNK" = "401" ]; then
+    echo "  => the relay now follows the origin's OWN authorization policy"
+  else
+    echo "  => UNEXPECTED -- delegation is not behaving as intended"
+  fi
+fi
+
+echo
+echo "=== AUTHORIZATION: the old bypass, for contrast ==="
 # XrdHttpReq.cc dispatches ext handlers at reqstate == 0, BEFORE the file-access
 # path where ofs.authorize and SciTokens checks live. If that means an
 # unauthenticated client can open a session, the sandbox is the only thing
 # between anyone on the network and arbitrary code execution.
 if [ -n "$ORIGIN_PORT" ]; then
-  NOAUTH=$(curl -ks -o /dev/null -w '%{http_code}' -X PUT --data-binary '' \
-           "https://localhost:$ORIGIN_PORT/mdsip/connect")
-  JUNK=$(curl -ks -o /dev/null -w '%{http_code}' -X PUT --data-binary '' \
-         -H 'Authorization: Bearer not-a-real-token' \
-         "https://localhost:$ORIGIN_PORT/mdsip/connect")
-  # A normal object write to a namespace we do NOT claim, for contrast.
+  # A normal object write to a namespace we do NOT claim: this is the origin's
+  # authorization working on its own, and the yardstick the relay must match.
   NORMAL=$(curl -ks -o /dev/null -w '%{http_code}' -X PUT --data-binary 'x' \
            "https://localhost:$ORIGIN_PORT/tdi/should-be-denied")
-  echo "  PUT /mdsip/connect, no credentials at all : $NOAUTH"
-  echo "  PUT /mdsip/connect, garbage bearer token  : $JUNK"
-  echo "  PUT /tdi/... (not claimed by us), no creds: $NORMAL   <- contrast"
-  if [ "$NOAUTH" = "200" ]; then
-    echo "  => THE RELAY IS UNAUTHENTICATED. The ext handler runs before authz."
-  fi
+  echo "  PUT /tdi/... (a path we do NOT claim), no creds: $NORMAL   <- the yardstick"
+  echo "  Before delegation, /mdsip/connect answered 200 here regardless of"
+  echo "  credentials; it now follows the same policy as the line above." 
 fi
 
 echo

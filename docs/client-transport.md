@@ -142,9 +142,9 @@ leaking every one of them.
   409 rather than interleaving it.
 - **No events.** Async server push cannot cross a request/response tunnel, and
   `Connection` has no event API regardless.
-- **The relay authenticates nobody.** An ext handler runs before XRootD's
-  authorization, so the bearer token this transport sends is not checked by
-  anything today. See the blocker in `docs/security.md`.
+- **The bearer token is checked once, at connect.** The relay delegates to the
+  origin's authorization there and then trusts the session token, so a session
+  can outlive the token that opened it. See `docs/security.md`.
 - **Sessions are sticky to one origin.** The director picks an origin at
   `/connect` and every later call must reach the same one. With a single origin
   this is invisible; with several, a client whose calls are spread across them

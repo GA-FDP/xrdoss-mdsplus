@@ -34,6 +34,12 @@ Origin:
     - FederationPrefix: /mdsip
       StoragePrefix: /data/mdsip
       Capabilities: ["PublicReads", "Reads", "DirectReads", "Writes"]
+    # Deliberately NOT PublicReads: this is the namespace whose policy should
+    # DENY an unauthenticated caller, which is what makes the auth=xrootd test
+    # able to fail. Testing only against a public namespace would prove nothing.
+    - FederationPrefix: /mdsip-private
+      StoragePrefix: /data/mdsip-private
+      Capabilities: ["Reads", "DirectReads"]
 
 Xrootd:
   ConfigFile: /etc/pelican/xrootd-extra.cfg

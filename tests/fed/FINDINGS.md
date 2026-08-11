@@ -320,13 +320,31 @@ The same request was **403 before** the handler claimed PUT and **200 after** �
 same URL, same absence of credentials. XRootD was enforcing authorization until
 the ext handler took the path away from it.
 
-Since an mdsip session is arbitrary code execution, an unauthenticated relay
-must never exist by accident. The handler now **refuses to load without an
-explicit `auth=` setting**, and when refused the endpoint falls back to normal
-XRootD handling (measured: `PUT` → 403, `POST` → 501), so no unauthenticated
-relay endpoint exists. `auth=none` is the only supported value today and logs a
-prominent warning; real token validation is not implemented. See
-`docs/security.md`.
+**Resolved by delegating rather than reimplementing.** The framework hands ext
+handlers the filesystem object (`XrdXrootdConfig.cc:306` →
+`XrdHttpTpcConfigure.cc:131`), so the handler can ask OFS to act on a path with
+the caller's `XrdSecEntity` and token and let the site's configured policy
+decide — the pattern `XrdHttpTPC` uses. With `auth=xrootd`, measured in the same
+federation using namespace policy as the only lever:
+
+| Endpoint | Policy | Result |
+|---|---|---|
+| `/mdsip/connect` | `PublicReads` | **200** |
+| `/mdsip-private/connect` | no `PublicReads` | **401** |
+| `/mdsip-private/connect` + garbage token | no `PublicReads` | **401** |
+
+The handler refuses to load without an explicit `auth=` setting, and when
+refused the endpoint falls back to normal XRootD handling (`PUT` → 403,
+`POST` → 501). See `docs/security.md`.
+
+## A prefix is not a path prefix
+
+Running two handler instances at `/mdsip` and `/mdsip-private` exposed a bug in
+`MatchesPath`: a bare `strncmp(path, prefix, len)` makes `/mdsip` claim
+`/mdsip-private` too, so the first instance swallowed the second's requests and
+404'd them as an unknown action. The prefix must end at a `/` or at the end of
+the path. Worth remembering for any handler that claims URL space by prefix —
+it silently shadows neighbouring namespaces that share a leading string.
 
 ## Reproduce
 

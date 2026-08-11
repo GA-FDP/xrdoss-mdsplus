@@ -41,6 +41,7 @@ PLUGIN_SO="${3:-}"; [ -n "$PLUGIN_SO" ] && PLUGIN_SO="$(readlink -f "$PLUGIN_SO"
 podman rm -f "$NAME" >/dev/null 2>&1 || true
 mkdir -p "$DATA/tdi"    # nominal StoragePrefix for the virtual-file export
 mkdir -p "$DATA/mdsip"  # ditto for the relay namespace; never read from
+mkdir -p "$DATA/mdsip-private"   # the non-public namespace used by the auth test
 
 MOUNTS=(
   -v "$DATA:/data:z"

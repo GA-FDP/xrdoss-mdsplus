@@ -23,12 +23,18 @@
 
 #include "XrdHttp/XrdHttpExtHandler.hh"
 #include "XrdOuc/XrdOucEnv.hh"
+#include "XrdOuc/XrdOucErrInfo.hh"
+#include "XrdSec/XrdSecEntity.hh"
+#include "XrdSfs/XrdSfsInterface.hh"
 #include "XrdSys/XrdSysError.hh"
 #include "XrdVersion.hh"
+
+#include <sys/stat.h>
 
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <cctype>
 #include <sstream>
 #include <string>
 
@@ -65,6 +71,25 @@ std::string ParmValue(const char *parms, const std::string &key,
     return dflt;
 }
 
+// Percent-encode for use as an opaque CGI value. The Authorization header is
+// "Bearer <jwt>", and the space alone would truncate the value.
+std::string UrlEncode(const std::string &s) {
+    static const char *hex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(s.size() + 16);
+    for (size_t i = 0; i < s.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out += static_cast<char>(c);
+        } else {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 0x0F];
+        }
+    }
+    return out;
+}
+
 // XrdHttp lowercases header names; look the value up defensively either way.
 std::string HeaderValue(std::map<std::string, std::string> &headers,
                         const std::string &lower_name) {
@@ -83,8 +108,9 @@ class HttpMdsipRelay : public XrdHttpExtHandler {
 public:
     HttpMdsipRelay(XrdSysError *log, const std::string &prefix,
                    const std::string &host, int port, int idle,
-                   size_t max_sessions, int timeout_ms)
-        : log_(log), prefix_(prefix),
+                   size_t max_sessions, int timeout_ms,
+                   XrdSfsFileSystem *sfs, const std::string &authpath)
+        : log_(log), prefix_(prefix), sfs_(sfs), authpath_(authpath),
           sessions_(host, port, idle, max_sessions, timeout_ms) {}
 
     bool MatchesPath(const char *verb, const char *path) {
@@ -106,7 +132,16 @@ public:
         // the Writes capability the director requires before it will route PUT.
         if (std::strcmp(verb, "POST") != 0 && std::strcmp(verb, "PUT") != 0)
             return false;
-        return std::strncmp(path, prefix_.c_str(), prefix_.size()) == 0;
+
+        if (std::strncmp(path, prefix_.c_str(), prefix_.size()) != 0)
+            return false;
+        // The prefix must end at a path separator. A bare strncmp would make
+        // prefix=/mdsip also claim /mdsip-private and /mdsipanything, silently
+        // shadowing a neighbouring namespace -- caught by the federation test,
+        // where two instances sit at /mdsip and /mdsip-private and the first
+        // swallowed the second's requests and 404'd them.
+        const char after = path[prefix_.size()];
+        return after == '\0' || after == '/';
     }
 
     int Init(const char *) { return 0; }
@@ -156,7 +191,55 @@ private:
         return true;
     }
 
+    // Delegate authorization to XRootD rather than validating tokens here.
+    //
+    // An ext handler is dispatched before the file-access path, so nothing it
+    // serves is authorized automatically -- but the framework hands us the
+    // filesystem object, and asking it to stat a path runs the site's
+    // configured ofs.authorize / SciTokens policy exactly as a normal request
+    // would. This is the pattern XrdHttpTPC uses (XrdHttpTpcTPC.cc:827-830).
+    //
+    // The upshot: the relay is protected by whatever already protects the rest
+    // of the origin, with no second token implementation to keep in step.
+    bool Authorized(XrdHttpExtReq &req, std::string &why) {
+        if (!sfs_) return true;   // auth=none; the loader has already warned
+
+        // XrdAccSciTokens reads the token from the `authz` opaque, which is
+        // where http.header2cgi would have put it for a normal request.
+        const std::string header = HeaderValue(req.headers, "authorization");
+        std::string opaque;
+        if (!header.empty()) opaque = "authz=" + UrlEncode(header);
+
+        struct stat sbuf;
+        XrdOucErrInfo einfo;
+        const int rc = sfs_->stat(authpath_.c_str(), &sbuf, einfo,
+                                  &req.GetSecEntity(),
+                                  opaque.empty() ? 0 : opaque.c_str());
+        if (rc == SFS_OK) return true;
+
+        // The path need not exist: authorization runs first, so ENOENT means
+        // the policy said yes and there was simply nothing there. Anything
+        // else -- EACCES, or an error we do not recognise -- denies, so an
+        // unexpected failure fails closed.
+        const int err = einfo.getErrInfo();
+        if (err == ENOENT) return true;
+
+        const char *text = einfo.getErrText();
+        why = std::string("not authorized for ") + authpath_ +
+              (text && *text ? std::string(": ") + text : std::string());
+        return false;
+    }
+
     int DoConnect(XrdHttpExtReq &req) {
+        // Checked once, at session creation. Every later call presents the
+        // 128-bit session token instead, so a session can outlive the bearer
+        // token that opened it -- bounded by the idle reaper, and the tradeoff
+        // is deliberate: re-authorizing every call would add a round trip to a
+        // workload that is thousands of one-signal gets.
+        std::string why;
+        if (!Authorized(req, why))
+            return Fail(req, 401, "Unauthorized", why);
+
         std::string error;
         const std::string token = sessions_.Open(error);
         if (token.empty()) return Fail(req, 503, "Service Unavailable", error);
@@ -192,8 +275,10 @@ private:
         return req.SendSimpleResp(200, "OK", 0, "", 0);
     }
 
-    XrdSysError   *log_;
-    std::string    prefix_;
+    XrdSysError      *log_;
+    std::string       prefix_;
+    XrdSfsFileSystem *sfs_;        // null when auth=none
+    std::string       authpath_;   // the path whose policy gates a session
     fdp::MdsipSessions sessions_;
 };
 
@@ -204,7 +289,6 @@ extern "C" XrdHttpExtHandler *XrdHttpGetExtHandler(XrdSysError *eDest,
                                                    const char *parms,
                                                    XrdOucEnv *myEnv) {
     (void)confg;
-    (void)myEnv;
 
     const std::string prefix   = ParmValue(parms, "prefix", "/mdsip");
     const std::string host     = ParmValue(parms, "host", "localhost");
@@ -229,26 +313,44 @@ extern "C" XrdHttpExtHandler *XrdHttpGetExtHandler(XrdSysError *eDest,
     // unauthenticated PUT to a path we do not claim returns 403
     // (tests/fed/probe_federation_post.sh).
     //
-    // Since a session is arbitrary code execution on the mdsip host, an
-    // unauthenticated relay must never be reached by accident. Refuse to load
-    // unless the operator has said which it is.
+    // The framework does hand us what is needed to do it ourselves, so this is
+    // an opt-in rather than a gap. Since a session is arbitrary code execution
+    // on the mdsip host, refuse to load unless told which mode this is.
     const std::string auth = ParmValue(parms, "auth", "");
-    if (auth != "none") {
-        eDest->Emsg("relay", "refusing to load: no 'auth' setting.",
-                    "An ext handler runs BEFORE XRootD authorization, so this "
-                    "relay authenticates nobody. Anyone who can reach this port "
-                    "could open an mdsip session, which is arbitrary code "
-                    "execution. Set auth=none to accept that deliberately "
-                    "(development only); token validation is not yet "
-                    "implemented -- see docs/security.md.");
+    const std::string authpath = ParmValue(parms, "authpath", prefix);
+    XrdSfsFileSystem *sfs = 0;
+
+    if (auth == "xrootd") {
+        // The same object XrdHttpTPC uses (XrdHttpTpcConfigure.cc:131); the
+        // framework puts it here in XrdXrootdConfig.cc:306.
+        void *raw = myEnv ? myEnv->GetPtr("XrdSfsFileSystem*") : 0;
+        sfs = static_cast<XrdSfsFileSystem *>(raw);
+        if (!sfs) {
+            eDest->Emsg("relay", "refusing to load: auth=xrootd, but the "
+                        "framework offered no XrdSfsFileSystem, so "
+                        "authorization cannot be delegated to it.");
+            return 0;
+        }
+        eDest->Say("++++++ XrdHttpMdsip auth=xrootd; sessions gated by the "
+                   "authorization policy on ", authpath.c_str());
+    } else if (auth == "none") {
+        eDest->Say("------ XrdHttpMdsip WARNING: auth=none. This relay is "
+                   "UNAUTHENTICATED and must not face an untrusted network.");
+    } else {
+        eDest->Emsg("relay", "refusing to load: 'auth' must be xrootd or none.",
+                    "An ext handler runs BEFORE XRootD authorization, so a "
+                    "relay that does not check for itself is open to anyone who "
+                    "can reach this port -- and an mdsip session is arbitrary "
+                    "code execution. Use auth=xrootd to delegate to this "
+                    "origin's existing authorization (optionally with "
+                    "authpath=<path>), or auth=none on a trusted network. "
+                    "See docs/security.md.");
         return 0;
     }
-    eDest->Say("------ XrdHttpMdsip WARNING: auth=none. This relay is "
-               "UNAUTHENTICATED and must not face an untrusted network.");
 
     const std::string banner = prefix + " -> mdsip " + host + ":" + port_str;
     eDest->Say("++++++ XrdHttpMdsip relay: ", banner.c_str());
 
     return new HttpMdsipRelay(eDest, prefix, host, port, idle, max_sessions,
-                              timeout_ms);
+                              timeout_ms, sfs, authpath);
 }
