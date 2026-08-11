@@ -88,10 +88,24 @@ public:
           sessions_(host, port, idle, max_sessions, timeout_ms) {}
 
     bool MatchesPath(const char *verb, const char *path) {
-        if (!path) return false;
-        // POST only: this is an RPC channel, and claiming GET would shadow the
-        // object namespace the Oss plugin serves.
-        if (!verb || std::strcmp(verb, "POST") != 0) return false;
+        if (!path || !verb) return false;
+
+        // POST and PUT, never GET. GET would shadow the object namespace the
+        // Oss plugin serves, and this is an RPC channel rather than a resource.
+        //
+        // PUT is here for the federation: the Pelican director refuses to route
+        // POST (404 at the namespace path, 405 at the API endpoint -- its own
+        // CORS header advertises only GET, PUT, OPTIONS, PROPFIND), but routes
+        // PUT with a 307 that preserves method and body. Measured in
+        // tests/fed/probe_federation_post.sh. Without PUT, clients cannot reach
+        // the relay through a federation URL at all and must address an origin
+        // directly.
+        //
+        // Claiming PUT across the whole prefix also means no PUT under it ever
+        // reaches storage -- which is what makes it safe to give the namespace
+        // the Writes capability the director requires before it will route PUT.
+        if (std::strcmp(verb, "POST") != 0 && std::strcmp(verb, "PUT") != 0)
+            return false;
         return std::strncmp(path, prefix_.c_str(), prefix_.size()) == 0;
     }
 
@@ -206,6 +220,31 @@ extern "C" XrdHttpExtHandler *XrdHttpGetExtHandler(XrdSysError *eDest,
         eDest->Emsg("relay", "invalid mdsip port", port_str.c_str());
         return 0;
     }
+
+    // An XrdHttpExtHandler runs BEFORE XRootD's authorization. XrdHttpReq.cc
+    // dispatches at reqstate == 0, ahead of the file-access path where
+    // ofs.authorize and the SciTokens plugin live, so nothing this handler
+    // serves is authenticated by XRootD -- measured: PUT /mdsip/connect returns
+    // 200 with no credentials and with a garbage bearer token, while the same
+    // unauthenticated PUT to a path we do not claim returns 403
+    // (tests/fed/probe_federation_post.sh).
+    //
+    // Since a session is arbitrary code execution on the mdsip host, an
+    // unauthenticated relay must never be reached by accident. Refuse to load
+    // unless the operator has said which it is.
+    const std::string auth = ParmValue(parms, "auth", "");
+    if (auth != "none") {
+        eDest->Emsg("relay", "refusing to load: no 'auth' setting.",
+                    "An ext handler runs BEFORE XRootD authorization, so this "
+                    "relay authenticates nobody. Anyone who can reach this port "
+                    "could open an mdsip session, which is arbitrary code "
+                    "execution. Set auth=none to accept that deliberately "
+                    "(development only); token validation is not yet "
+                    "implemented -- see docs/security.md.");
+        return 0;
+    }
+    eDest->Say("------ XrdHttpMdsip WARNING: auth=none. This relay is "
+               "UNAUTHENTICATED and must not face an untrusted network.");
 
     const std::string banner = prefix + " -> mdsip " + host + ":" + port_str;
     eDest->Say("++++++ XrdHttpMdsip relay: ", banner.c_str());

@@ -23,6 +23,17 @@ Origin:
     - FederationPrefix: /tdi
       StoragePrefix: /data/tdi
       Capabilities: ["PublicReads", "Reads", "DirectReads"]
+    # The relay namespace. Nothing is ever read from this StoragePrefix -- the
+    # XrdHttpExtHandler claims the path before XRootD consults storage at all --
+    # but the director needs a registered namespace to know which origin
+    # /mdsip/... belongs to, and the origin refuses to export a missing
+    # directory.
+    # Writes is here only to make the PUT-routability probe conclusive: without
+    # it a PUT is refused for lacking the capability, which is indistinguishable
+    # from the director not routing PUT at all.
+    - FederationPrefix: /mdsip
+      StoragePrefix: /data/mdsip
+      Capabilities: ["PublicReads", "Reads", "DirectReads", "Writes"]
 
 Xrootd:
   ConfigFile: /etc/pelican/xrootd-extra.cfg

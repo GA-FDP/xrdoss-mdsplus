@@ -68,7 +68,13 @@ std::string BuildUrlBase(const std::string &target) {
     return scheme + "://" + hostport + prefix;
 }
 
-HttpTunnel::HttpTunnel() : curl_(0) {}
+HttpTunnel::HttpTunnel() : curl_(0) {
+    // PUT by default: it is the only method that works both against a
+    // directly-addressed origin AND through the Pelican director. Overridable
+    // for debugging, not for deployment.
+    const char *m = std::getenv("FDP_TUNNEL_METHOD");
+    method_ = (m && *m) ? m : "PUT";
+}
 
 HttpTunnel::~HttpTunnel() {
     Close();
@@ -132,11 +138,32 @@ bool HttpTunnel::Post(const std::string &action, const std::string &body,
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.data());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE,
                      static_cast<curl_off_t>(body.size()));
+    // PUT rather than POST, with the body still sent as POST fields. The
+    // Pelican director will not route POST -- 404 at the namespace path, 405 at
+    // its API endpoint, and its CORS header advertises only GET, PUT, OPTIONS,
+    // PROPFIND -- but routes PUT with a 307 that preserves method and body.
+    // Both reach a directly-addressed origin, so PUT is the one that works
+    // everywhere. Measured in tests/fed/probe_federation_post.sh.
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method_.c_str());
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, Collect);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &out);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    // Required for the federation: the director answers with a 307 to an
+    // origin, so not following it means never reaching the relay at all.
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+    // A custom CA is a legitimate deployment need; skipping verification is
+    // not, and exists only so the self-signed local test federation can be
+    // exercised. Both are opt-in, so the secure behaviour is what you get by
+    // doing nothing.
+    const char *cainfo = std::getenv("FDP_TUNNEL_CAINFO");
+    if (cainfo && *cainfo) curl_easy_setopt(curl, CURLOPT_CAINFO, cainfo);
+    const char *insecure = std::getenv("FDP_TUNNEL_INSECURE");
+    if (insecure && *insecure) {
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    }
     // No total timeout: a legitimate call can be slow (a wide getMany over a
     // large tree). Bound the connect instead, which is what actually hangs
     // when the origin is unreachable.

@@ -32,10 +32,10 @@ is the whole job:
 
 | Vtable call | What happens |
 |---|---|
-| `connect` | parse `host[:port][/prefix]`, `POST /connect`, keep the session token |
-| `send` | buffer bytes until a **complete call** is assembled, then `POST /msg` and hold the answer |
+| `connect` | parse `host[:port][/prefix]`, `PUT /connect`, keep the session token |
+| `send` | buffer bytes until a **complete call** is assembled, then `PUT /msg` and hold the answer |
 | `recv` | drain the held answer |
-| `disconnect` | `POST /close`, free the session |
+| `disconnect` | `PUT /close`, free the session |
 
 `flush`, `listen`, `authorize`, `reuseCheck` and `check` are NULL. All are
 optional — the in-tree GSI transport leaves four of them NULL the same way.
@@ -81,6 +81,14 @@ offsets are exactly how a header gets mis-parsed silently.
 | Target | the connection string: `fdp://host[:port][/prefix]`, prefix defaulting to `/mdsip` |
 | Bearer token | `BEARER_TOKEN`, then `~/.fdp/token` — the same precedence the `fdp` CLI uses |
 | Scheme | `https` always, unless `FDP_TUNNEL_SCHEME=http` (**test only**, for a local relay with no TLS) |
+| CA | `FDP_TUNNEL_CAINFO` for a custom CA; `FDP_TUNNEL_INSECURE=1` skips verification (**test only**) |
+| Method | `PUT`, overridable with `FDP_TUNNEL_METHOD` for debugging |
+
+**Why PUT and not POST.** The Pelican director will not route POST — 404 at the
+namespace path, 405 at its API endpoint, and its own CORS header advertises only
+`GET, PUT, OPTIONS, PROPFIND`. It routes PUT with a 307 that preserves method
+and body. Both reach a directly-addressed origin, so PUT is the one that works
+everywhere. Measured in `tests/fed/probe_federation_post.sh`.
 
 `https` is the default rather than something the target string can quietly
 downgrade, so an insecure deployment is not the easy mistake. A missing token
@@ -104,6 +112,17 @@ same call made directly to mdsip:
 `MDSIP_SANDBOX=1 pixi run relay-e2e` does it against the sandboxed server, which
 is the production topology.
 
+**Through a real federation**, `pixi run fed-post` points a stock
+`MDSplus.Connection` at the *director* rather than an origin:
+
+```
+target: fdp://localhost:8444/mdsip
+\ipmhd OK (256,) · \q95 OK · 10+32 OK · getMany OK 256 samples · \psirz OK (256, 65, 65)
+=> A STOCK MDSplus.Connection WORKS THROUGH THE DIRECTOR
+```
+
+so a 4.3 MB answer survives the 307 redirect intact.
+
 Lifecycle and error paths are covered separately
 (`tests/integration/transport_edge_cases.py`): 25 sequential `get()` on one
 session, state surviving repeated `openTree`, 8 independent connections, 40
@@ -123,9 +142,10 @@ leaking every one of them.
   409 rather than interleaving it.
 - **No events.** Async server push cannot cross a request/response tunnel, and
   `Connection` has no event API regardless.
-- **Sessions are sticky to one origin** and cannot be load balanced — a property
-  of the relay, inherited here.
-- **The federation path is untested.** Everything above was verified against an
-  origin directly. Whether a `POST` under a namespace prefix routes through the
-  Pelican director the way a `GET` does is an open question, and the reason the
-  target string accepts an arbitrary prefix.
+- **The relay authenticates nobody.** An ext handler runs before XRootD's
+  authorization, so the bearer token this transport sends is not checked by
+  anything today. See the blocker in `docs/security.md`.
+- **Sessions are sticky to one origin.** The director picks an origin at
+  `/connect` and every later call must reach the same one. With a single origin
+  this is invisible; with several, a client whose calls are spread across them
+  breaks. Untested against a multi-origin federation.

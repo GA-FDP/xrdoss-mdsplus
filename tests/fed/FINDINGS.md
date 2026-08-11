@@ -268,6 +268,66 @@ needs an image with MDSplus installed from OSG/EPEL. Until that exists,
 `run_fed_test.sh` skips with an explanation; `tests/integration/` covers the
 plugin end to end without a container.
 
+## The director does not route POST; it does route PUT
+
+**Measured 2026-08-11** by `probe_federation_post.sh`, against the local
+federation with the relay ext handler loaded on the origin.
+
+| Request | Result |
+|---|---|
+| `POST https://director/mdsip/connect` | **404**, no redirect |
+| `POST https://director/api/v1.0/director/origin/mdsip/connect` | **405 Method Not Allowed** |
+| `GET https://director/mdsip/connect` (control) | **307** — the namespace *is* registered and routable |
+| `PUT https://director/mdsip/connect` | **307** to the origin, method and body preserved |
+
+The director says so itself, in a header on every response:
+
+```
+access-control-allow-methods: GET, PUT, OPTIONS, PROPFIND
+```
+
+This is why `libXrdHttpMdsip.so` claims **both POST and PUT**, and why the
+client transport sends **PUT** by default: PUT is the only method that works
+both against a directly-addressed origin and through the director.
+
+**A control saved this from a wrong conclusion.** The first PUT probe returned
+405 and looked like "PUT is not routable either" — but the control, a PUT to
+`/test/probe.txt`, returned 405 as well, and that namespace has `Writes: false`.
+The 405 was the missing capability, not the method. Adding `Writes` to the
+namespace turned the same probe into a 307.
+
+So a production federation must declare the relay namespace **writable** for the
+director to route to it. That sounds worse than it is: the ext handler claims
+every PUT under its prefix before XRootD consults storage, so no PUT under it
+can ever write a file.
+
+## The relay bypasses XRootD authorization entirely
+
+**This is a deployment blocker, found while testing the above.**
+
+`XrdHttpReq.cc:990` dispatches ext handlers at `reqstate == 0` — *before* the
+file-access path where `ofs.authorize` and the SciTokens plugin live. So
+nothing an ext handler serves is authenticated by XRootD. Measured against the
+federation origin, which has TLS configured:
+
+| Request | Result |
+|---|---|
+| `PUT /mdsip/connect`, no credentials at all | **200** |
+| `PUT /mdsip/connect`, garbage bearer token | **200** |
+| `PUT /tdi/...` (a path we do *not* claim), no credentials | **403** ← contrast |
+
+The same request was **403 before** the handler claimed PUT and **200 after** —
+same URL, same absence of credentials. XRootD was enforcing authorization until
+the ext handler took the path away from it.
+
+Since an mdsip session is arbitrary code execution, an unauthenticated relay
+must never exist by accident. The handler now **refuses to load without an
+explicit `auth=` setting**, and when refused the endpoint falls back to normal
+XRootD handling (measured: `PUT` → 403, `POST` → 501), so no unauthenticated
+relay endpoint exists. `auth=none` is the only supported value today and logs a
+prominent warning; real token validation is not implemented. See
+`docs/security.md`.
+
 ## Reproduce
 
 ```bash
@@ -275,4 +335,8 @@ bash tests/fed/fedbox.sh start                    # plain federation
 bash tests/fed/fedbox.sh start /tmp/extra.cfg     # with an osslib fragment
 bash tests/fed/fedbox.sh start /tmp/extra.cfg /path/to/plugin.so
 bash tests/fed/fedbox.sh stop
+```
+
+```bash
+pixi run fed-post        # the POST/PUT routing and authorization probe
 ```

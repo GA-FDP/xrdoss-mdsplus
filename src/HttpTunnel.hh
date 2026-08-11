@@ -38,6 +38,7 @@ private:
 
     CURL       *curl_;
     std::string url_base_;   // scheme://host:port/prefix
+    std::string method_;     // PUT; see the constructor for why
     std::string token_;
     std::string bearer_;
 };

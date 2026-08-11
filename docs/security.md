@@ -308,3 +308,41 @@ relay tracking usage per session.
 forwards anything a client sends, so the sandbox is the *only* control between a
 token holder and code execution. Do not deploy the relay against an unsandboxed
 mdsip, including "temporarily" for testing against production trees.
+
+## Blocker: the relay authenticates nobody
+
+An `XrdHttpExtHandler` runs **before** XRootD's authorization.
+`XrdHttpReq.cc:990` dispatches at `reqstate == 0`, ahead of the file-access path
+where `ofs.authorize` and the SciTokens plugin live, so nothing the relay serves
+is authenticated by XRootD. Measured against a TLS-configured federation origin
+(`tests/fed/probe_federation_post.sh`):
+
+| Request | Result |
+|---|---|
+| `PUT /mdsip/connect`, no credentials at all | **200** |
+| `PUT /mdsip/connect`, garbage bearer token | **200** |
+| `PUT /tdi/...` (a path the relay does *not* claim), no credentials | **403** ← contrast |
+
+The contrast is the finding: the *same* unauthenticated request was 403 before
+the handler claimed PUT and 200 after. XRootD was enforcing authorization until
+the ext handler took that path away from it.
+
+Combined with the top of this document — a session is arbitrary code execution —
+this means **anyone who can reach the origin's HTTPS port could run code on the
+mdsip host**, with the sandbox as the only thing standing in the way. The
+sandbox is genuinely good, but it was designed assuming the attacker is a *token
+holder*, and this makes it the whole perimeter rather than the second layer.
+
+**What is done about it now:** the handler **refuses to load** unless an
+explicit `auth=` parm is set. When refused, the endpoint falls back to normal
+XRootD handling — measured `PUT` → 403, `POST` → 501 — so no unauthenticated
+relay endpoint exists. `auth=none` is the only value supported today; it loads
+the handler and logs a prominent warning.
+
+**What is not done:** token validation. `auth=none` is honest, not safe. Before
+the relay faces anything but a trusted network it needs to verify the bearer
+token itself, since XRootD will not do it. The likely shape is validating the
+SciToken against the federation issuer and checking that its scope covers the
+namespace — the same check the storage path would have applied. Until then, the
+relay belongs on a trusted network only, and the fact that it works is not
+evidence that it is safe to expose.

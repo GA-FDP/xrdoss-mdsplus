@@ -18,7 +18,7 @@ The two server-side plugins load into a **stock** Pelican origin — no fork —
 
 ```
 ofs.osslib ++ /path/to/libXrdOssMdsplus.so prefix=/tdi server=localhost:8000
-http.exthandler mdsip /path/to/libXrdHttpMdsip.so prefix=/mdsip,host=localhost,port=8000
+http.exthandler mdsip /path/to/libXrdHttpMdsip.so prefix=/mdsip,host=localhost,port=8000,auth=none
 ```
 
 Note that neither name in the config carries the **`-5` suffix** the files on
@@ -250,14 +250,18 @@ Three POSTs make up the whole protocol:
 
 | Request | Body up | Body down |
 |---|---|---|
-| `POST <prefix>/connect` | — | an opaque session token |
-| `POST <prefix>/msg` + `X-Fdp-Session` | one complete mdsip call | exactly one mdsip answer |
-| `POST <prefix>/close` + `X-Fdp-Session` | — | — |
+| `PUT <prefix>/connect` | — | an opaque session token |
+| `PUT <prefix>/msg` + `X-Fdp-Session` | one complete mdsip call | exactly one mdsip answer |
+| `PUT <prefix>/close` + `X-Fdp-Session` | — | — |
+
+POST works too, but only against a directly-addressed origin: the Pelican
+director refuses to route POST and routes PUT, so PUT is what the client uses.
+See [`tests/fed/FINDINGS.md`](tests/fed/FINDINGS.md).
 
 Loaded alongside the osslib, again with the **unsuffixed** name:
 
 ```
-http.exthandler mdsip /path/to/libXrdHttpMdsip.so prefix=/mdsip,host=localhost,port=8000
+http.exthandler mdsip /path/to/libXrdHttpMdsip.so prefix=/mdsip,host=localhost,port=8000,auth=none
 ```
 
 Parms are a single `XrdOucStream::GetWord()` token, so they **cannot contain
@@ -352,7 +356,7 @@ ignores resource limits on cgroups v1 rootless.
 
 | Piece | Status |
 |---|---|
-| Federation routing for the relay | **untested** — everything was verified against an origin directly. Whether a `POST` under a namespace prefix routes through the Pelican director the way a `GET` does is open |
+| **Token validation in the relay** | **not built, and a deployment blocker.** An ext handler runs before XRootD's authorization, so the relay authenticates nobody — measured, `docs/security.md`. It refuses to load without an explicit `auth=none`, so the hole cannot be hit by accident, but `auth=none` is honest rather than safe |
 | Tailored seccomp profile | not built — podman's default profile is in force |
 | microVM isolation | not built, and weaker justification since the sandbox moved to its own service account. `/dev/kvm` is available; see the trade-offs in `docs/security.md` |
 
