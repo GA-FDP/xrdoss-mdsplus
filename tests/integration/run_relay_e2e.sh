@@ -72,7 +72,7 @@ for _ in $(seq 1 150); do
   sleep 0.1
 done
 (exec 3<>/dev/tcp/127.0.0.1/"$HTTP_PORT") 2>/dev/null || fail "http port never opened"
-exec 3<&- 3>&- 2>/dev/null || true
+{ exec 3<&- 3>&-; } 2>/dev/null || true   # braces: a bare `exec ... 2>/dev/null` redirects the WHOLE script's stderr
 
 grep -q "XrdHttpMdsip relay" "$WORK/xrootd.log" || fail "the relay handler was never loaded"
 echo "--- 0. handler loaded ---"

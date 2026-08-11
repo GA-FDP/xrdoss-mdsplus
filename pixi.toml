@@ -27,5 +27,7 @@ e2e = { cmd = "bash tests/integration/run_e2e.sh", depends-on = ["build"] }
 relay-e2e = { cmd = "bash tests/integration/run_relay_e2e.sh", depends-on = ["build"] }
 sandbox-build = "podman build -f Containerfile.mdsip -t fdp-mdsip ."
 sandbox-verify = "bash tests/security/verify_sandbox.sh"
+seccomp-gen = "python tests/security/make_seccomp.py deploy/mdsip-seccomp.json"
+syscall-capture = "bash tests/security/capture_syscalls.sh"
 fed-post = { cmd = "bash tests/fed/probe_federation_post.sh", depends-on = ["build"] }
 clean = "rm -rf build"

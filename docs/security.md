@@ -94,6 +94,7 @@ run.
 | No capabilities | `--cap-drop=ALL` | most escape paths |
 | No privilege regain | `--security-opt=no-new-privileges` | setuid escalation |
 | Not uid 0 | `USER mdsip` (5000) | shortening the path out of the namespace |
+| Allowlist seccomp | `--security-opt seccomp=deploy/mdsip-seccomp.json` | the ~200 syscalls mdsip never makes, as kernel attack surface |
 | Dedicated service account | run rootless podman as `fdp-mdsip`, not the origin's user | container-root mapping to the owner of `issuer.jwk` |
 | Bounded forks | `--pids-limit 256` | fork bombs |
 | Bounded memory and CPU | `--memory 2g --cpus 2` | resource exhaustion |
@@ -133,6 +134,64 @@ all, so `GetManyExecute.fun` is absent and every batch request fails with
 normally. The noarch `mdsplus-kernel` package carries it; the image installs
 both, and the build asserts the file exists rather than discovering it in
 production.
+
+## The seccomp profile
+
+podman's default is a **denylist**: it refuses ~50 syscalls and permits the
+rest, which is sized for "untrusted-ish code in a container". The assumption
+here is stronger — a client already has arbitrary native code execution — so
+what matters is the reachable kernel surface, and only an allowlist shrinks it.
+[`deploy/mdsip-seccomp.json`](../deploy/mdsip-seccomp.json) permits ~150
+syscalls and returns EPERM for everything else, including `mount`, `unshare`,
+`setns`, `pivot_root`, `ptrace`, `bpf`, `perf_event_open`, `userfaultfd`,
+`io_uring_*`, `keyctl`, the module and kexec calls, and the setuid family.
+
+The JSON is generated, not written:
+[`tests/security/make_seccomp.py`](../tests/security/make_seccomp.py) holds the
+list with the reasoning attached, because JSON cannot carry a comment and the
+reasons matter more than the names. `pixi run seccomp-gen` regenerates it.
+
+**How the list was derived.** `tests/security/capture_syscalls.sh` traces a real
+mdsip through the full integration workload — connect, `openTree`, `get`,
+`getMany`, a 4 MB result, error paths, concurrent connections, disconnects — and
+reports 39 distinct syscalls. That capture runs against the conda build on this
+el8 host, while the sandbox runs the RPM build on AlmaLinux 9, so the profile
+adds a documented margin of glibc variants (`clone3`, `rseq`, `newfstatat`,
+`statx`) and sibling I/O calls. Each addition is an alternative spelling of
+something already observed; none grants a capability the observed set does not
+already imply.
+
+The margin exists because the failure mode of a missing syscall is a container
+that works here and fails in production. What closes that gap is not the
+capture but the validation: the full relay end-to-end suite runs against the
+seccomp-confined sandbox (`MDSIP_SANDBOX=1 pixi run relay-e2e`) and passes —
+4.3 MB results, `getMany`, 8 concurrent connections, 40 connect/disconnect
+cycles.
+
+### What it is actually worth
+
+Less than it first appears, and worth saying plainly. Most escape-relevant
+syscalls are *already* refused by `--cap-drop=ALL`: measured in a
+capability-dropped container without any seccomp, `chroot`, `setns` and
+`unshare(CLONE_NEWUSER)` all fail anyway. Testing those would credit seccomp for
+the capability drop's work.
+
+What the allowlist uniquely removes is the long tail that needs no capability at
+all. `personality()` is the clean demonstration — it **succeeds** in the
+capability-dropped container and is **EPERM** under the profile:
+
+| | no seccomp | this profile |
+|---|---|---|
+| `getpid()` (positive control) | 1 | 1 |
+| `personality(0)` | **0 — succeeded** | **-1 — blocked** |
+| `chroot`, `setns`, `unshare` | -1 | -1 (the capability drop, either way) |
+
+`verify_sandbox.py` asserts that, with the `getpid()` control checked **first**:
+TDI's FFI silently returns -1 when it mis-calls a function — it cannot call
+variadic ones such as `syscall()` or `ptrace()` at all — and a -1 for that
+reason is indistinguishable from a seccomp denial. An earlier version of this
+probe used `MdsShr->syscall(...)` and appeared to prove the profile worked; it
+was returning -1 for `getpid` too.
 
 ## Verifying it
 
@@ -373,10 +432,6 @@ via `crun --vm` — is available as a follow-on and would replace a shared kerne
 with a virtualised one. It is the natural next hardening step, not a
 prerequisite: the assets behind the current boundary are read-only public
 archive data, and the crown jewels are already in a different container.
-
-**Seccomp is podman's default profile**, not a tailored one. A profile derived
-from what mdsip actually syscalls would shrink the kernel attack surface
-considerably and is cheap to produce.
 
 **Denial of service is bounded, not solved.** Limits cap one container, so a
 client cannot take the host down, but it can degrade the service for everyone

@@ -53,7 +53,7 @@ done
   podman logs "$NAME" 2>&1 | tail -20
   exit 1
 }
-exec 3<&- 3>&- 2>/dev/null || true
+{ exec 3<&- 3>&-; } 2>/dev/null || true   # braces: a bare `exec ... 2>/dev/null` redirects the WHOLE script's stderr
 
 # Propagated so the verifier can tell "control missing" from "control this host
 # cannot enforce, waived on purpose". Unset, the limit checks are hard failures.

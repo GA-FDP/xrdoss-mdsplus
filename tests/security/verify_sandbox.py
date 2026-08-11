@@ -191,6 +191,43 @@ expect_shell_works("memory is limited",
                    "an unbounded allocation takes the host down, not just the container",
                    waivable=True)
 
+# --- kernel attack surface ----------------------------------------------
+# The seccomp allowlist. Most escape-relevant syscalls (mount, setns, chroot)
+# are already refused by --cap-drop=ALL, so testing those would credit seccomp
+# for work the capability drop does. What the allowlist uniquely removes is the
+# long tail that needs no capability at all -- personality() and mlock() are
+# reachable in a capability-dropped container and are not on the list.
+print()
+print("Kernel surface (seccomp):")
+
+def ffi(expr):
+    return int(conn.get(expr))
+
+# Positive control FIRST. TDI's FFI silently returns -1 when it mis-calls a
+# function -- it cannot call variadic ones such as syscall() or ptrace() -- and
+# a -1 for that reason is indistinguishable from "seccomp blocked it". Without
+# this control every check below would pass for the wrong reason.
+probe_ok = False
+try:
+    probe_ok = ffi("MdsShr->getpid()") > 0
+except Exception:
+    pass
+expect("the FFI probe itself works", probe_ok,
+       "MdsShr->getpid() did not return a pid",
+       "a broken probe makes every seccomp check below meaningless")
+
+if probe_ok:
+    for name, expr in (("personality()", "MdsShr->personality(0)"),
+                       ("mlock()", "MdsShr->mlock(0, 0)")):
+        try:
+            rc = ffi(expr)
+        except Exception as exc:
+            rc = -1   # refused outright is also blocked
+        expect("%s is not on the allowlist" % name, rc == -1,
+               "%s returned %s -- it should be EPERM" % (name, rc),
+               "measured reachable without seccomp, so this is what the "
+               "allowlist is actually buying")
+
 # --- the service still works -------------------------------------------
 # A sandbox that breaks the server is not a sandbox, it is an outage.
 print()

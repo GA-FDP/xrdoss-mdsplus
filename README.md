@@ -324,6 +324,7 @@ container is the boundary:
 
 ```bash
 pixi run sandbox-build     # -> localhost/fdp-mdsip
+pixi run seccomp-gen       # -> deploy/mdsip-seccomp.json (allowlist, ~150 calls)
 pixi run sandbox-verify    # starts it, attacks it, tears it down
 MDSIP_SANDBOX=1 pixi run relay-e2e   # the relay against the sandbox
 ```
@@ -362,7 +363,6 @@ ignores resource limits on cgroups v1 rootless.
 
 | Piece | Status |
 |---|---|
-| Tailored seccomp profile | not built — podman's default profile is in force |
 | microVM isolation | not built, and weaker justification since the sandbox moved to its own service account. `/dev/kvm` is available; see the trade-offs in `docs/security.md` |
 
 Deployment also needs ops access, which is the actual gate on going live.
