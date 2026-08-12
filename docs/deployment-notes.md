@@ -178,6 +178,51 @@ gives up is director-based origin selection, which is worth close to nothing
 here: relay sessions are sticky to one origin regardless, so the director could
 only ever choose which origin a session starts on.
 
+### Getting the relay to the sandbox: the hop that needs thought
+
+The origin container publishes ports (`-p 8000:8000 -p 8443:8443`) rather than
+using host networking, so it is on a podman bridge. Two consequences:
+
+**`localhost` in the relay config is wrong.** Inside the origin container that
+is the container itself, not the host — measured. The relay must address the
+host, via `host.containers.internal` or an explicit address.
+
+**Port 8000 is already taken** by the origin, so the sandbox cannot use its
+default. Pick another (8100 below).
+
+The security requirement makes this more than a plumbing detail: **mdsip must be
+reachable by the origin container and by nothing else.** A client who can reach
+mdsip directly bypasses the relay, and with it `auth=xrootd` — and an mdsip
+session is arbitrary code execution. So:
+
+- `127.0.0.1:8100` is safe but the origin container **cannot reach it**.
+- `0.0.0.0:8100` is reachable but exposes unauthenticated code execution to the
+  whole network. Never this.
+- The right answer is the address the origin sees as "the host", provided that
+  address is host-local. Find it:
+
+```bash
+sudo podman exec pelican-origin getent hosts host.containers.internal
+```
+
+Rootful podman normally answers with the bridge gateway (`10.88.0.1`-ish), which
+is host-local and exactly what is wanted. Rootless answers with the host's LAN
+address — measured here, `10.1.1.6` — which is **not** acceptable to bind mdsip
+to without a firewall rule restricting it to the host.
+
+Then publish the sandbox there and point the relay at it:
+
+```bash
+MDSIP_PUBLISH=10.88.0.1:8100 scripts/mdsip-sandbox.sh start /mnt/beegfs/data/archives/mdsplus
+#            ^ whatever the command above returned
+```
+
+If that address turns out to be routable, the alternative is to run the sandbox
+**rootful on the origin's own podman network**, so the two talk over the bridge
+by container name and nothing is published at all. That trades away the
+`fdp-mdsip` service account, though `--userns=auto` would map container-root to
+an unprivileged subuid, which is a better mapping than the rootless default.
+
 ### What has to change on the origin
 
 1. **Two bind mounts** into the origin container: the `.so`, and a config
