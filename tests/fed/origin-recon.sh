@@ -67,14 +67,17 @@ say "XRootD version in the image (the plugin is built against v5.9.2)"
 report "(container not running)" \
   "[ '$RUNNING' = running ] && podman exec '$NAME' sh -c 'xrootd -v 2>&1 | head -1'"
 
+# podman logs on a container running for days can take minutes, which reads
+# as a hang. Bound it and read only the tail.
+LOGS="$(timeout 30 podman logs --tail 5000 "$NAME" 2>&1 || true)"
 say "ext handler slots -- XRootD allows 4 in total"
 report "(none seen in the logs)" \
-  "podman logs '$NAME' 2>&1 | grep -oE 'exthandlerlib [^ \"]*' | sort -u"
-echo "  in use: $(podman logs "$NAME" 2>&1 | grep -c 'exthandlerlib' 2>/dev/null) of 4"
+  "printf '%s\\n' \"$LOGS\" | grep -oE 'exthandlerlib [^ \"]*' | sort -u"
+echo "  in use: $(printf '%s\\n' "$LOGS" | grep -c 'exthandlerlib') of 4"
 
 say "namespaces currently exported"
 report "(none found in the logs)" \
-  "podman logs '$NAME' 2>&1 | grep -oE 'Path:/[a-zA-Z0-9_/.-]+' | sort -u | head -20"
+  "printf '%s\\n' \"$LOGS\" | grep -oE 'Path:/[a-zA-Z0-9_/.-]+' | sort -u | head -20"
 
 say "is anything managing this container?"
 report "(no matching user unit)" \

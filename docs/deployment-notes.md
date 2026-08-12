@@ -140,6 +140,44 @@ federation test does (`tests/fed/fedbox.sh` mounts `fed.yaml` as
 takes one, so if something already uses it the fragment has to merge with that
 file rather than claim the setting.
 
+### The d3d-origin case, concretely
+
+Its `podman run` mounts the whole config directory from the host:
+
+```
+-v /var/pelican/config:/etc/pelican          # so /etc/pelican/X is /var/pelican/config/X
+-v /mnt/beegfs/data:/fdp-d3d/                # the archive, mounted READ-WRITE
+--restart always --replace
+serve -f https://osdf-director.osg-htc.org   # the PRODUCTION OSDF director
+```
+
+Two consequences worth having up front.
+
+**Config needs no image or mount change.** `/etc/pelican` is already a bind
+mount of `/var/pelican/config`, and `Xrootd.ConfigFile` is already set to
+`/etc/pelican/xrootd.cfg` — so the relay line is *appended* to
+`/var/pelican/config/xrootd.cfg` on the host. There is no `config.d/` in use and
+none is needed. The plugin `.so` can be delivered the same way, by dropping it
+in `/var/pelican/config/`, if changing the `podman run` is undesirable; a
+dedicated `-v /var/pelican/plugins:/plugins:ro` is tidier but means recreating
+the container.
+
+**It is federated with the production OSDF director, not a test one.** So do
+NOT register a `/mdsip` namespace for the first deployment: that would mean a
+writable namespace in the real federation (the director only routes `PUT`, and
+only to namespaces with the `Writes` capability). Point clients at the origin
+directly instead —
+
+```
+MDSplus.Connection('fdp://d3d-origin.gat.com:8443/mdsip')
+```
+
+— which needs no namespace at all, because the ext handler claims the path
+before XRootD consults any namespace. Port 8443 is already published. What this
+gives up is director-based origin selection, which is worth close to nothing
+here: relay sessions are sticky to one origin regardless, so the director could
+only ever choose which origin a session starts on.
+
 ### What has to change on the origin
 
 1. **Two bind mounts** into the origin container: the `.so`, and a config
@@ -165,8 +203,12 @@ Note the **unsuffixed** library name: XRootD appends the plugin version itself.
 
 ### Checks worth doing before the change
 
-- **ABI.** The plugin must match the origin's XRootD. Both are v5.9.2 today —
-  confirm with `podman exec <origin> xrootd -v` against `pixi run xrootd -v`.
+- **ABI.** The production origin is `origin:v7.23.3`, carrying XRootD
+  **v5.9.1**, while the plugin is built against **v5.9.2**. That mismatch turns
+  out not to matter: the relay loads and serves a full session in that exact
+  image, tested directly. Re-check when either version moves, since XRootD
+  refuses plugins whose declared version it considers incompatible and the
+  failure is a startup abort, not a degradation.
 - **Ext handler headroom.** XRootD allows 4 and Pelican already loads 3
   (`XrdHttpPelican`, `HttpTPC`, and one more), so ours is the fourth and last.
   Anything else wanting one later will not fit.
