@@ -418,14 +418,32 @@ incidentally moves container-root off the invoking user, which is a small bonus
 for the property in the section above. Untested here; verify with
 `sandbox-verify` before relying on it.
 
-**The image has to be in *that* user's storage.** Rootless podman keeps images
-per user, so one built as another account is invisible to `fdp-mdsip` and the
-unit fails with "image not known". Either build it as that user, or hand it
-over:
+**Build the image on the origin, as the service account.** Rootless podman
+keeps images per *user* and, obviously but easy to forget, per *host*. An image
+built on a workstation does not exist on the origin at all:
+
+```
+$ podman save localhost/fdp-mdsip:latest -o /tmp/fdp-mdsip.tar
+Error: localhost/fdp-mdsip:latest: image not known
+```
+
+So the normal path is to build it where it will run, under the account that
+will run it — which also skips any handover:
 
 ```bash
-podman save localhost/fdp-mdsip:latest -o /tmp/fdp-mdsip.tar   # as the builder
-sudo -u fdp-mdsip podman load -i /tmp/fdp-mdsip.tar            # as the service account
+machinectl shell fdp-mdsip@                      # a real session; rootless podman needs one
+cd /path/to/xrdoss-mdsplus
+podman build -f Containerfile.mdsip -t fdp-mdsip .
+```
+
+Only if the origin cannot build it (no network for `dnf`, no checkout) does a
+transfer make sense. `podman save` writes a 0644 tar, so the receiving account
+can read it without further ado:
+
+```bash
+podman save localhost/fdp-mdsip:latest -o /tmp/fdp-mdsip.tar   # on a host that HAS it
+scp /tmp/fdp-mdsip.tar d3d-origin:/tmp/                        # if it is a different host
+sudo -u fdp-mdsip podman load -i /tmp/fdp-mdsip.tar
 ```
 
 Confirm the mapping changed, which is the entire point of the exercise:
