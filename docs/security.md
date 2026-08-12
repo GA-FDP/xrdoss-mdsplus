@@ -453,6 +453,23 @@ sudo -u fdp-mdsip id -u                       # the new uid, not 1122
 podman exec fdp-mdsip cat /proc/self/uid_map  # container 0 -> the new uid
 ```
 
+### Point it at the real archive
+
+The tree paths in both the script and the quadlet are set for the flat,
+single-tree fixture the tests use (`efit01_path=/trees`). A real archive needs
+its own layout: MDSplus resolves `<treename>_path` per tree and falls back to
+`default_tree_path`, so mirror whatever the production MDSplus configuration
+already uses, rewritten to paths under `/trees`.
+
+```bash
+MDSIP_TREE_ENV="efit01_path=/trees/efit01 default_tree_path=/trees" \
+  scripts/mdsip-sandbox.sh start /mnt/beegfs/data/archives/mdsplus
+```
+
+Getting this wrong does not fail at startup — the server comes up fine and then
+every `openTree` returns `%TREE-E-FOPENR`, which reads like a permissions
+problem and is not one.
+
 Then install [`deploy/fdp-mdsip.container`](../deploy/fdp-mdsip.container) as a
 systemd **user** unit under that account, and verify with the origin's uid
 supplied so the check is live rather than skipped:

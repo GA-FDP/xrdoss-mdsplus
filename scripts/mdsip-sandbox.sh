@@ -46,6 +46,13 @@ PIDS="${MDSIP_PIDS:-512}"
 # control is the thing this whole file exists to avoid.
 SECCOMP="${MDSIP_SECCOMP:-$ROOT/deploy/mdsip-seccomp.json}"
 
+# MDSplus resolves <treename>_path per tree, falling back to default_tree_path.
+# Space-separated name=value pairs; paths are container paths, under /trees.
+#   MDSIP_TREE_ENV="efit01_path=/trees/efit01 default_tree_path=/trees"
+TREE_ENV="${MDSIP_TREE_ENV:-efit01_path=/trees default_tree_path=/trees}"
+TREE_ENV_FLAGS=()
+for _kv in $TREE_ENV; do TREE_ENV_FLAGS+=(-e "$_kv"); done
+
 # podman derives several paths from /run/user/$UID, which does not survive the
 # login session that created it. See docs/deployment-notes.md.
 if [ ! -d "/run/user/$(id -u)" ]; then
@@ -191,10 +198,11 @@ podman run -d --name "$NAME" \
   `# Only the limits whose controllers are actually delegated; see above.` \
   "${LIMIT_FLAGS[@]}" \
   \
-  `# Trees are read-only above; this tells MDSplus where they are. The path is` \
-  `# a template per tree name, matching the origin plugin's treepath.` \
-  -e "efit01_path=/trees" \
-  -e "default_tree_path=/trees" \
+  `# Where MDSplus looks for trees, INSIDE the container. The default suits the` \
+  `# flat single-tree fixture the tests use; a real archive almost certainly` \
+  `# needs its own layout, so override MDSIP_TREE_ENV with whatever the` \
+  `# production MDSplus configuration already uses, rewritten to /trees.` \
+  "${TREE_ENV_FLAGS[@]}" \
   \
   "$IMAGE" >/dev/null
 

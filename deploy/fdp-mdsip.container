@@ -48,6 +48,11 @@ NoNewPrivileges=true
 # tests/security/make_seccomp.py; do not hand-edit the JSON.
 SeccompProfile=/etc/fdp/mdsip-seccomp.json
 
+# Where MDSplus looks for trees, inside the container. These suit the flat
+# single-tree fixture the tests use; a real archive needs its own layout --
+# mirror whatever the production MDSplus configuration already uses, rewritten
+# to paths under /trees. MDSplus resolves <treename>_path per tree and falls
+# back to default_tree_path.
 Environment=efit01_path=/trees
 Environment=default_tree_path=/trees
 
