@@ -112,6 +112,34 @@ because `ConnectToMds` `dlopen`s `libMdsIpTCP.so` by name at runtime.
 So the relay can go first, as a bind mount and a config fragment, with the Oss
 plugin deferred to whenever an image rebuild is convenient.
 
+### Finding where the origin's config actually lives
+
+When the origin is started by a hand-rolled `podman run`, the configuration is
+in one of two places and `podman inspect` shows both. It also reproduces the
+original command, which is what has to be edited:
+
+```bash
+podman ps --format '{{.Names}} {{.Image}}'
+podman inspect --format '{{range .Config.CreateCommand}}{{.}} {{end}}' <name>
+podman inspect --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' <name>
+podman inspect --format '{{range .Config.Env}}{{.}}{{"\n"}}{{end}}' <name> | grep -i pelican
+```
+
+Pelican reads, in increasing precedence: `/etc/pelican/pelican.yaml`, then
+drop-ins `/etc/pelican/config.d/*.yaml`, then `PELICAN_<SECTION>_<KEY>`
+environment variables, then command-line flags. So the settings are either in a
+bind-mounted YAML (visible in `Mounts`) or in `PELICAN_*` variables (visible in
+`Env`) — one of those two will have them.
+
+**Prefer a drop-in.** Adding `/etc/pelican/config.d/50-mdsip.yaml` composes with
+whatever is already there instead of editing it, and is exactly what the
+federation test does (`tests/fed/fedbox.sh` mounts `fed.yaml` as
+`config.d/10-fed.yaml`), so the pattern is proven.
+
+**Check whether `Xrootd.ConfigFile` is already set** before adding it. Pelican
+takes one, so if something already uses it the fragment has to merge with that
+file rather than claim the setting.
+
 ### What has to change on the origin
 
 1. **Two bind mounts** into the origin container: the `.so`, and a config
