@@ -385,10 +385,10 @@ usermod --add-subuids 900000-965535 --add-subgids 900000-965535 fdp-mdsip
 # the container stops when the last session ends.
 loginctl enable-linger fdp-mdsip
 
-# The trees must be readable by the new account -- but CHECK FIRST, see below.
-# setfacl works on xfs/ext4; on BeeGFS it fails with "Operation not supported"
-# unless ACL support is enabled server-side and remounted.
-setfacl -R -m u:fdp-mdsip:rX /srv/fdp/trees
+# Tree access: usually NOTHING to do -- see below. On the DIII-D origin the
+# archive is world-readable, which is all the container needs. Only if it is
+# not, and only on a filesystem with working ACLs (not BeeGFS):
+#   setfacl -R -m u:fdp-mdsip:rX /srv/fdp/trees
 ```
 
 ### Tree read access: check before granting
@@ -397,9 +397,10 @@ setfacl -R -m u:fdp-mdsip:rX /srv/fdp/trees
 uid 5000 maps into the subuid range -- with `755360:65536` that is host uid
 760359 -- and *that* uid belongs to no groups. Two consequences:
 
-- **World-readable works.** `o+r` on the files and `o+x` on every parent
-  directory is all the container needs, and archive data usually has it
-  already. Check before changing anything:
+- **World-readable works**, and is the normal case: `o+r` on the files with
+  `o+x` on every parent directory is all the container needs. The DIII-D
+  archive at `/mnt/beegfs/data/archives/mdsplus` already is, so no grant is
+  required there at all. Confirm on any new deployment with:
 
   ```bash
   namei -l /mnt/beegfs/data/archives/mdsplus     # o+x on every component?
