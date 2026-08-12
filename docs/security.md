@@ -464,22 +464,44 @@ already uses, rewritten to paths under `/trees`.
 For DIII-D this is a straight substitution. `toksearch_d3d/data/d3d.yaml`
 declares the `mds_tree` search path, and `fdp` joins those entries with `;` into
 `default_tree_path` (`fdp/environment.py:148`). Swap the Pelican root
-`pelican://osg-htc.org:443/fdp-d3d/archives/mdsplus` for the container's mount
-point and the rest carries over unchanged, `~` escapes included:
+`pelican://osg-htc.org:443/fdp-d3d/archives/mdsplus` for the local archive root
+and the rest carries over unchanged, `~` escapes included.
+
+Mount it at the **same path it has on the host** and there is no substitution
+left to get wrong — the tree path is simply the site's real one:
 
 ```bash
-scripts/mdsip-sandbox.sh start /mnt/beegfs/data/archives/mdsplus   # host root -> /trees
+export MDSIP_TREE_MOUNT=/mnt/beegfs/data/archives/mdsplus
+export MDSIP_TREE_ENV='default_tree_path=/mnt/beegfs/data/archives/mdsplus/codes/~t/~j~i/~h~g/~f~e/~d~c;/mnt/beegfs/data/archives/mdsplus/usershots/~t;/mnt/beegfs/data/archives/mdsplus/models/~t;/mnt/beegfs/data/archives/mdsplus/shots/~t/~f~e/~d~c'
 
-MDSIP_TREE_ENV='default_tree_path=/trees/codes/~t/~j~i/~h~g/~f~e/~d~c;/trees/usershots/~t;/trees/models/~t;/trees/shots/~t/~f~e/~d~c'
+scripts/mdsip-sandbox.sh start /mnt/beegfs/data/archives/mdsplus
 ```
 
-Single-quoted: the value contains `~` and `;`, and both must reach MDSplus
-literally. Verified end to end — `printenv` inside the container returns the
-string byte-identical.
+Single-quote the tree path: it contains `~` and `;`, and both must reach
+MDSplus literally. Verified end to end — `printenv` inside the container
+returns the string byte-identical.
 
 Getting this wrong does not fail at startup — the server comes up fine and then
 every `openTree` returns `%TREE-E-FOPENR`, which reads like a permissions
-problem and is not one.
+problem and is not one. That failure mode is the whole argument for mounting at
+the real path: it removes the rewrite that could be wrong.
+
+**The mount path is not a security control.** Mounting the archive elsewhere
+does not hide the host layout — `/proc/self/mountinfo` reports the bind *source*
+regardless, and a client with code execution can read it. Measured, with the
+archive mounted at `/trees`:
+
+```
+2376 2374 8:5 /tmp/fdp-trees /trees ro,relatime - xfs ...
+                ^^^^^^^^^^^^ the host path, visible anyway
+```
+
+What a client can reach is set by *what* is mounted and its mode (`:ro`), not by
+the name it appears under, so the two options are equivalent on security. The
+real trade is between no-rewrite correctness above and operator clarity: with a
+distinct path such as `/trees` (the `MDSIP_TREE_MOUNT` default, which suits the
+test fixture) it is obvious whether a command is landing in the container or on
+the host.
 
 Then install [`deploy/fdp-mdsip.container`](../deploy/fdp-mdsip.container) as a
 systemd **user** unit under that account, and verify with the origin's uid
