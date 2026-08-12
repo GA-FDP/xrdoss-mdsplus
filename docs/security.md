@@ -385,9 +385,37 @@ usermod --add-subuids 900000-965535 --add-subgids 900000-965535 fdp-mdsip
 # the container stops when the last session ends.
 loginctl enable-linger fdp-mdsip
 
-# The trees must be readable by the new account, and only readable.
+# The trees must be readable by the new account -- but CHECK FIRST, see below.
+# setfacl works on xfs/ext4; on BeeGFS it fails with "Operation not supported"
+# unless ACL support is enabled server-side and remounted.
 setfacl -R -m u:fdp-mdsip:rX /srv/fdp/trees
 ```
+
+### Tree read access: check before granting
+
+**Rootless podman does not read host files as the service account.** Container
+uid 5000 maps into the subuid range -- with `755360:65536` that is host uid
+760359 -- and *that* uid belongs to no groups. Two consequences:
+
+- **World-readable works.** `o+r` on the files and `o+x` on every parent
+  directory is all the container needs, and archive data usually has it
+  already. Check before changing anything:
+
+  ```bash
+  namei -l /mnt/beegfs/data/archives/mdsplus     # o+x on every component?
+  ls -l  /mnt/beegfs/data/archives/mdsplus | head
+  ```
+
+- **Adding `fdp-mdsip` to a group does NOT work.** The accessing uid is the
+  mapped subuid, not the account, so group membership never applies. This is
+  the obvious substitute for a failed `setfacl` and it silently does nothing.
+
+If the trees are not world-readable and ACLs are unavailable, the option that
+fits is `--userns=keep-id:uid=5000,gid=5000`, which maps the *server process*
+to the host account so ordinary owner/group permissions apply again — and
+incidentally moves container-root off the invoking user, which is a small bonus
+for the property in the section above. Untested here; verify with
+`sandbox-verify` before relying on it.
 
 **The image has to be in *that* user's storage.** Rootless podman keeps images
 per user, so one built as another account is invisible to `fdp-mdsip` and the
