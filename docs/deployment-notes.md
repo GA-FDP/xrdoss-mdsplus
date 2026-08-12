@@ -205,10 +205,19 @@ session is arbitrary code execution. So:
 sudo podman exec pelican-origin getent hosts host.containers.internal
 ```
 
-Rootful podman normally answers with the bridge gateway (`10.88.0.1`-ish), which
-is host-local and exactly what is wanted. Rootless answers with the host's LAN
-address — measured here, `10.1.1.6` — which is **not** acceptable to bind mdsip
-to without a firewall rule restricting it to the host.
+Rootful podman answers with the bridge gateway, which is host-local and exactly
+what is wanted — on d3d-origin it is **`10.88.0.1`**. (Rootless answers with the
+host's LAN address instead — measured, `10.1.1.6` — which would **not** be
+acceptable to bind mdsip to without a firewall rule.)
+
+Rootless podman is permitted to bind a specific non-loopback host address, so
+the sandbox can publish there even though it runs as `fdp-mdsip`: verified by
+binding a test container to a host IP and seeing the listener appear.
+
+Note what `10.88.0.1` admits: the origin container, and **anything else on the
+host's default podman bridge**. That is the right blast radius if the origin is
+the only container there; if untrusted containers share that bridge, they can
+reach mdsip directly and bypass the relay.
 
 Then publish the sandbox there and point the relay at it:
 
