@@ -364,16 +364,46 @@ protected by ordinary file permissions rather than by every one of those
 controls continuing to hold.
 
 ```bash
-# as root, once
-useradd --system --create-home --home-dir /var/lib/fdp-mdsip \
-        --shell /sbin/nologin fdp-mdsip
-# system accounts get no subuid range automatically; pick one that does not
-# overlap an existing entry in /etc/subuid
-usermod --add-subuids 900000-965535 --add-subgids 900000-965535 fdp-mdsip
-loginctl enable-linger fdp-mdsip          # or the container dies with the session
+# --- as root, once ---
 
-# the trees must be readable by the new account, and only readable
+# Check first: the range below must not overlap anything already allocated.
+cat /etc/subuid /etc/subgid
+
+# A real shell, deliberately: rootless podman needs a proper session to build
+# images and manage units, and `machinectl shell fdp-mdsip@` requires one.
+# nologin buys little here -- the account owns nothing, and anyone who can
+# become it can run commands regardless.
+useradd --system --create-home --home-dir /var/lib/fdp-mdsip \
+        --shell /bin/bash fdp-mdsip
+
+# System accounts get NO subuid range automatically, and podman refuses to run
+# rootless without one ("cannot find UID/GID for user"). Do this before the
+# account's first podman command.
+usermod --add-subuids 900000-965535 --add-subgids 900000-965535 fdp-mdsip
+
+# Without lingering there is no /run/user/<uid> outside a login session, and
+# the container stops when the last session ends.
+loginctl enable-linger fdp-mdsip
+
+# The trees must be readable by the new account, and only readable.
 setfacl -R -m u:fdp-mdsip:rX /srv/fdp/trees
+```
+
+**The image has to be in *that* user's storage.** Rootless podman keeps images
+per user, so one built as another account is invisible to `fdp-mdsip` and the
+unit fails with "image not known". Either build it as that user, or hand it
+over:
+
+```bash
+podman save localhost/fdp-mdsip:latest -o /tmp/fdp-mdsip.tar   # as the builder
+sudo -u fdp-mdsip podman load -i /tmp/fdp-mdsip.tar            # as the service account
+```
+
+Confirm the mapping changed, which is the entire point of the exercise:
+
+```bash
+sudo -u fdp-mdsip id -u                       # the new uid, not 1122
+podman exec fdp-mdsip cat /proc/self/uid_map  # container 0 -> the new uid
 ```
 
 Then install [`deploy/fdp-mdsip.container`](../deploy/fdp-mdsip.container) as a
