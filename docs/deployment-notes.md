@@ -266,6 +266,13 @@ Note the **unsuffixed** library name: XRootD appends the plugin version itself.
 - **Ext handler headroom.** XRootD allows 4 and Pelican already loads 3
   (`XrdHttpPelican`, `HttpTPC`, and one more), so ours is the fourth and last.
   Anything else wanting one later will not fit.
-- **`authpath`.** Point it at the namespace whose tokens clients actually hold —
-  `/fdp-d3d/archives` rather than `/mdsip` — or every real token will be
-  refused.
+- **`authpath`.** Point it at the path whose tokens clients actually hold, not
+  at the relay's own prefix, or every real token is refused. On d3d-origin the
+  single export is `FederationPrefix: /fdp-d3d` with
+  `Capabilities: [Reads, Writes, Listings]` — note **no `PublicReads`**, so
+  reads genuinely require a token and `auth=xrootd` has something to enforce.
+  Use **`/fdp-d3d/archives/mdsplus`**: it is the tree root, so the question the
+  relay asks is exactly "may you read the trees?". It is also the more permissive
+  of the sensible choices — a token scoped narrowly to the archive satisfies it,
+  whereas `/fdp-d3d` would demand read on the namespace root and refuse that
+  same token.
