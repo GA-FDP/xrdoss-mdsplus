@@ -21,7 +21,11 @@ export MDSIP_NETWORK="${MDSIP_NETWORK:-fdp-mdsip-verify-net}"
 
 if [ ! -d "/run/user/$(id -u)" ]; then
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/xdg-$(id -u)}"
-  mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+  # libpod/tmp too: podman creates it under a runtime dir it set up itself, but
+  # NOT under one handed to it, and then fails with "error creating temporary
+  # file" plus a pause.pid path that does not exist. /tmp gets cleaned on this
+  # host, so this recurs every time the directory disappears.
+  mkdir -p "$XDG_RUNTIME_DIR/libpod/tmp" && chmod 700 "$XDG_RUNTIME_DIR"
 fi
 
 if ! podman image exists "${MDSIP_IMAGE:-localhost/fdp-mdsip:latest}" 2>/dev/null; then
