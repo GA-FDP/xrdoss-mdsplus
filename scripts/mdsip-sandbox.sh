@@ -46,10 +46,17 @@ PIDS="${MDSIP_PIDS:-512}"
 # control is the thing this whole file exists to avoid.
 SECCOMP="${MDSIP_SECCOMP:-$ROOT/deploy/mdsip-seccomp.json}"
 
+# Where the archive appears INSIDE the container. Defaults to /trees, but
+# setting it to the host path makes the two identical, and then the tree path
+# below is the site's real one with no substitution -- one less thing to get
+# subtly wrong, since a bad path fails only at openTree, never at startup.
+#   MDSIP_TREE_MOUNT=/mnt/beegfs/data/archives/mdsplus
+TREE_MOUNT="${MDSIP_TREE_MOUNT:-/trees}"
+
 # MDSplus resolves <treename>_path per tree, falling back to default_tree_path.
-# Space-separated name=value pairs; paths are container paths, under /trees.
-#   MDSIP_TREE_ENV="efit01_path=/trees/efit01 default_tree_path=/trees"
-TREE_ENV="${MDSIP_TREE_ENV:-efit01_path=/trees default_tree_path=/trees}"
+# Space-separated name=value pairs; paths are CONTAINER paths, so under
+# $TREE_MOUNT.
+TREE_ENV="${MDSIP_TREE_ENV:-efit01_path=$TREE_MOUNT default_tree_path=$TREE_MOUNT}"
 TREE_ENV_FLAGS=()
 for _kv in $TREE_ENV; do TREE_ENV_FLAGS+=(-e "$_kv"); done
 
@@ -173,7 +180,7 @@ podman run -d --name "$NAME" \
   `# --- filesystem: nothing writable that survives, nothing readable that matters ---` \
   --read-only \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
-  -v "$TREES:/trees:ro" \
+  -v "$TREES:$TREE_MOUNT:ro" \
   \
   `# On RHEL-family hosts podman mounts the HOST's subscription credentials at` \
   `# /run/secrets by default -- entitlement certs and rhsm config that nobody` \
@@ -206,7 +213,7 @@ podman run -d --name "$NAME" \
   \
   "$IMAGE" >/dev/null
 
-echo "started $NAME on $PUBLISH -> 8000 (trees $TREES, read-only)"
+echo "started $NAME on $PUBLISH -> 8000 (trees $TREES -> $TREE_MOUNT, read-only)"
 
 # Print the identity mapping rather than leaving it to be inferred: the host uid
 # behind container-root is what an escape would land on, and it is invisible

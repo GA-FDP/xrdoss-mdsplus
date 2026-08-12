@@ -36,9 +36,11 @@ Tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m
 # Masks the host subscription credentials podman mounts here by default.
 Tmpfs=/run/secrets:rw,noexec,nosuid,nodev,size=1m
 
-# Adjust to the real tree location. It must be read-only: the archive policy is
-# read-only, and the server has arbitrary code execution.
-Volume=/mnt/beegfs/data/archives/mdsplus:/trees:ro
+# It must be read-only: the archive policy is read-only, and the server has
+# arbitrary code execution.
+# Mounted at the SAME path it has on the host, so the tree path below is the
+# site's real one with no substitution.
+Volume=/mnt/beegfs/data/archives/mdsplus:/mnt/beegfs/data/archives/mdsplus:ro
 
 DropCapability=ALL
 NoNewPrivileges=true
@@ -55,8 +57,8 @@ SeccompProfile=/etc/fdp/mdsip-seccomp.json
 # back to default_tree_path.
 # DIII-D: the mds_tree search path from toksearch_d3d/data/d3d.yaml, with the
 # Pelican root (pelican://osg-htc.org:443/fdp-d3d/archives/mdsplus) replaced by
-# this container's mount point. Semicolon-joined, exactly as fdp builds it.
-Environment=default_tree_path=/trees/codes/~t/~j~i/~h~g/~f~e/~d~c;/trees/usershots/~t;/trees/models/~t;/trees/shots/~t/~f~e/~d~c
+# the local archive root. Semicolon-joined, exactly as fdp builds it.
+Environment=default_tree_path=/mnt/beegfs/data/archives/mdsplus/codes/~t/~j~i/~h~g/~f~e/~d~c;/mnt/beegfs/data/archives/mdsplus/usershots/~t;/mnt/beegfs/data/archives/mdsplus/models/~t;/mnt/beegfs/data/archives/mdsplus/shots/~t/~f~e/~d~c
 
 # --dns=none closes DNS as an exfiltration channel regardless of what the
 # network backend does; the sandbox connects to nothing and needs no resolver.
