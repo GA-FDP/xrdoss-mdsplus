@@ -89,3 +89,59 @@ invalid argument`, which masks the real errors and looks like a different
 problem entirely. The default runtime is correct; only the paths need changing.
 
 The durable fix is `loginctl enable-linger <user>`, which needs root.
+
+
+## Deploying the plugins onto the origin
+
+Three artifacts, three different destinations, and only one of them needs to
+touch the origin at all to get the tunnel working.
+
+| Artifact | Goes | Needs |
+|---|---|---|
+| `libXrdHttpMdsip-5.so` (relay) | into the origin container | **a stock Pelican origin** — nothing else |
+| `libXrdOssMdsplus-5.so` (virtual files) | into the origin container | an image with the **MDSplus runtime** (`Containerfile.runtime`) |
+| `libMdsIpFDP.so` (client transport) | onto **clients**, not the origin | packaging on `ga-fdp` |
+
+**The relay needs no custom image.** It links `libXrdUtils`, `libXrdHttpUtils`
+and libc, and nothing else — verified by loading it into the unmodified
+`pelican_platform/origin:latest`, which contains no MDSplus whatsoever
+(`/usr/local/mdsplus` absent, zero `libMdsIp*` in `ldconfig`), and running a
+full session through it. The Oss plugin is the one that forces a derived image,
+because `ConnectToMds` `dlopen`s `libMdsIpTCP.so` by name at runtime.
+
+So the relay can go first, as a bind mount and a config fragment, with the Oss
+plugin deferred to whenever an image rebuild is convenient.
+
+### What has to change on the origin
+
+1. **Two bind mounts** into the origin container: the `.so`, and a config
+   fragment.
+2. **`Xrootd.ConfigFile`** in the Pelican config pointing at that fragment.
+   Pelican allows one, so if it is already in use the fragment has to merge with
+   what is there.
+3. **A `/mdsip` namespace export**, with the `Writes` capability — the director
+   will not route `PUT` to a namespace without it, and `PUT` is the only method
+   it routes (`tests/fed/FINDINGS.md`). Safe despite how it reads: the handler
+   claims every `PUT` under its prefix before XRootD consults storage, so none
+   can write a file.
+4. **A restart** to pick it up.
+
+The fragment itself is one line — `tests/fed/xrootd-relay-only.cfg` is exactly
+its production shape:
+
+```
+http.exthandler mdsip /plugins/libXrdHttpMdsip.so prefix=/mdsip,host=<mdsip-host>,port=8000,auth=xrootd,authpath=/fdp-d3d/archives
+```
+
+Note the **unsuffixed** library name: XRootD appends the plugin version itself.
+
+### Checks worth doing before the change
+
+- **ABI.** The plugin must match the origin's XRootD. Both are v5.9.2 today —
+  confirm with `podman exec <origin> xrootd -v` against `pixi run xrootd -v`.
+- **Ext handler headroom.** XRootD allows 4 and Pelican already loads 3
+  (`XrdHttpPelican`, `HttpTPC`, and one more), so ours is the fourth and last.
+  Anything else wanting one later will not fit.
+- **`authpath`.** Point it at the namespace whose tokens clients actually hold —
+  `/fdp-d3d/archives` rather than `/mdsip` — or every real token will be
+  refused.
