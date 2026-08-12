@@ -38,7 +38,7 @@ Tmpfs=/run/secrets:rw,noexec,nosuid,nodev,size=1m
 
 # Adjust to the real tree location. It must be read-only: the archive policy is
 # read-only, and the server has arbitrary code execution.
-Volume=/srv/fdp/trees:/trees:ro
+Volume=/mnt/beegfs/data/archives/mdsplus:/trees:ro
 
 DropCapability=ALL
 NoNewPrivileges=true
@@ -53,8 +53,10 @@ SeccompProfile=/etc/fdp/mdsip-seccomp.json
 # mirror whatever the production MDSplus configuration already uses, rewritten
 # to paths under /trees. MDSplus resolves <treename>_path per tree and falls
 # back to default_tree_path.
-Environment=efit01_path=/trees
-Environment=default_tree_path=/trees
+# DIII-D: the mds_tree search path from toksearch_d3d/data/d3d.yaml, with the
+# Pelican root (pelican://osg-htc.org:443/fdp-d3d/archives/mdsplus) replaced by
+# this container's mount point. Semicolon-joined, exactly as fdp builds it.
+Environment=default_tree_path=/trees/codes/~t/~j~i/~h~g/~f~e/~d~c;/trees/usershots/~t;/trees/models/~t;/trees/shots/~t/~f~e/~d~c
 
 # --dns=none closes DNS as an exfiltration channel regardless of what the
 # network backend does; the sandbox connects to nothing and needs no resolver.

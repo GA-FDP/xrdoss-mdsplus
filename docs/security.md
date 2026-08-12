@@ -461,10 +461,21 @@ its own layout: MDSplus resolves `<treename>_path` per tree and falls back to
 `default_tree_path`, so mirror whatever the production MDSplus configuration
 already uses, rewritten to paths under `/trees`.
 
+For DIII-D this is a straight substitution. `toksearch_d3d/data/d3d.yaml`
+declares the `mds_tree` search path, and `fdp` joins those entries with `;` into
+`default_tree_path` (`fdp/environment.py:148`). Swap the Pelican root
+`pelican://osg-htc.org:443/fdp-d3d/archives/mdsplus` for the container's mount
+point and the rest carries over unchanged, `~` escapes included:
+
 ```bash
-MDSIP_TREE_ENV="efit01_path=/trees/efit01 default_tree_path=/trees" \
-  scripts/mdsip-sandbox.sh start /mnt/beegfs/data/archives/mdsplus
+scripts/mdsip-sandbox.sh start /mnt/beegfs/data/archives/mdsplus   # host root -> /trees
+
+MDSIP_TREE_ENV='default_tree_path=/trees/codes/~t/~j~i/~h~g/~f~e/~d~c;/trees/usershots/~t;/trees/models/~t;/trees/shots/~t/~f~e/~d~c'
 ```
+
+Single-quoted: the value contains `~` and `;`, and both must reach MDSplus
+literally. Verified end to end — `printenv` inside the container returns the
+string byte-identical.
 
 Getting this wrong does not fail at startup — the server comes up fine and then
 every `openTree` returns `%TREE-E-FOPENR`, which reads like a permissions
