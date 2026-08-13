@@ -25,6 +25,30 @@ CFG="$WORK/xrootd.cfg"
 [ -f "$RELAY_FILE" ] || { echo "FAIL: build first (pixi run build)"; exit 1; }
 [ -d "$TREES" ] || { echo "SKIP: no trees at $TREES"; exit 0; }
 
+# Several DISTINCT shots, because the tree-context check cannot work without
+# them: if every connection opens the same shot, a server sharing one tree
+# context returns exactly what a correct one returns. That is precisely how the
+# old "8 concurrent connections are independent" check passed while `mdsip -m`
+# was serving every client whichever shot was opened last.
+#
+# The fixture ships one shot, so clone it. The clones carry identical DATA --
+# only the shot number differs -- which is all $SHOT needs to tell them apart.
+BASE_SHOT="$(ls "$TREES"/efit01_*.tree 2>/dev/null | head -1 |
+             sed 's/.*efit01_\([0-9]*\)\.tree/\1/')"
+RELAY_SHOTS=""
+if [ -n "$BASE_SHOT" ] && [ -w "$TREES" ]; then
+  RELAY_SHOTS="$BASE_SHOT"
+  for i in 1 2 3 4 5 6 7; do
+    n=$((BASE_SHOT + i))
+    for ext in tree datafile characteristics; do
+      [ -f "$TREES/efit01_$n.$ext" ] || \
+        cp "$TREES/efit01_$BASE_SHOT.$ext" "$TREES/efit01_$n.$ext" 2>/dev/null || true
+    done
+    [ -f "$TREES/efit01_$n.tree" ] && RELAY_SHOTS="$RELAY_SHOTS,$n"
+  done
+fi
+export RELAY_SHOTS
+
 rm -rf "$WORK"
 mkdir -p "$WORK/admin" "$WORK/run" "$WORK/export/plain"
 
@@ -140,14 +164,45 @@ else
     if [ -n "${SANDBOXED:-}" ]; then
       podman exec "$MDSIP_NAME" sh -c 'ls -d /proc/[0-9]* | wc -l' 2>/dev/null || echo 0
     else
-      pgrep -c -f "mdsip -m -p $MDSIP_PORT" 2>/dev/null || echo 0
+      # One process per connection, so no -m in the pattern. Matching the old
+      # "mdsip -m -p" here would find nothing at all, and a counter stuck at 0
+      # reports "no leak" for every possible outcome.
+      pgrep -c -f "mdsip -p $MDSIP_PORT" 2>/dev/null || echo 0
     fi
   }
+
+  # Positive control for the counter itself. Idle is now legitimately 0 children,
+  # so "0 before, 0 after" is indistinguishable from a pattern that matches
+  # nothing. Hold one session open and require the counter to see it.
+  LD_LIBRARY_PATH="$ROOT/build:${LD_LIBRARY_PATH:-}" FDP_TUNNEL_SCHEME=http \
+  python - "$HTTP_PORT" > "$WORK/holder.log" 2>&1 <<'PYEOF' &
+import os, sys, time
+from MDSplus import Connection
+c = Connection("fdp://127.0.0.1:%s/mdsip" % sys.argv[1])
+c.openTree(os.environ.get("RELAY_TREE", "efit01"),
+           int(os.environ.get("RELAY_SHOT", "190000")))
+print("holding", flush=True)
+time.sleep(10)
+PYEOF
+  HOLDER=$!
+  sleep 4
+  HELD="$(count_mdsip)"
+  grep -q holding "$WORK/holder.log" 2>/dev/null \
+    || fail "leak-counter control never opened a session: $(tail -2 "$WORK/holder.log" 2>/dev/null)"
+  kill "$HOLDER" 2>/dev/null || true
+  wait "$HOLDER" 2>/dev/null || true
+  sleep 2
+  if [ "${SANDBOXED:-}" = "" ] && [ "$HELD" -lt 1 ]; then
+    fail "session-leak counter is broken: saw $HELD processes while a session was open"
+  fi
+  echo "  leak counter sees $HELD process(es) with one session held"
+
   BEFORE="$(count_mdsip)"
 
   LD_LIBRARY_PATH="$ROOT/build:${LD_LIBRARY_PATH:-}" \
   FDP_TUNNEL_SCHEME=http \
   RELAY_HTTP_PORT="$HTTP_PORT" \
+  RELAY_SHOTS="$RELAY_SHOTS" \
     python "$ROOT/tests/integration/transport_edge_cases.py" \
     || fail "transport edge cases failed"
 

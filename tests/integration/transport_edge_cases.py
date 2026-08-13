@@ -47,17 +47,38 @@ b = np.asarray(c.get(r"\ipmhd"))
 check("state survives repeated openTree", np.array_equal(a, b))
 
 # --- many independent connections ---------------------------------------
-# Each must get its own relay session; sharing would interleave two callers
-# into one mdsip byte stream.
-conns = []
-for i in range(8):
-    ci = Connection(TARGET)
-    ci.openTree(TREE, SHOT)
-    conns.append(ci)
-got = [len(np.asarray(ci.get(r"\ipmhd"))) for ci in conns]
-check("8 concurrent connections are independent",
-      len(set(got)) == 1 and got[0] > 0, str(set(got)))
-del conns
+# Each connection must have its own TREE context, not just its own session.
+#
+# The previous version of this check opened the SAME shot on all 8 connections
+# and asserted the results were identical. It could not fail: shared tree state
+# produces identical results, so the assertion REWARDED the bug it was meant to
+# catch. It passed for months while `mdsip -m` was silently serving every
+# client whichever shot was opened last (see Containerfile.mdsip).
+#
+# So: distinct shots, and $SHOT -- which reports the shot open in THIS
+# connection's context -- must come back as the one this connection opened.
+shots = [int(s) for s in os.environ.get("RELAY_SHOTS", "").split(",") if s]
+if len(shots) < 2:
+    check("N connections keep separate tree contexts", True,
+          "SKIPPED: set RELAY_SHOTS to 2+ comma-separated shots")
+else:
+    conns = []
+    for s in shots:
+        ci = Connection(TARGET)
+        ci.openTree(TREE, s)
+        conns.append((s, ci))
+    # Open every tree BEFORE reading any of them. Opening and reading one at a
+    # time would let each connection finish before the next interferes, which
+    # is exactly how the sequential case passes while the concurrent one does
+    # not.
+    wrong = []
+    for s, ci in conns:
+        seen = int(np.asarray(ci.get("$SHOT")))
+        if seen != s:
+            wrong.append("opened %d saw %d" % (s, seen))
+    check("%d connections keep separate tree contexts" % len(shots),
+          not wrong, "; ".join(wrong))
+    del conns
 
 # --- open/close churn ----------------------------------------------------
 # A leaked session would hold an mdsip process until the idle reaper; a leaked
