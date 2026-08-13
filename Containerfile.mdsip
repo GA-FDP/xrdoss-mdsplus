@@ -32,7 +32,7 @@ ARG MDSPLUS_NOARCH=http://www.mdsplus.org/dist/rhel9/stable/RPMS/noarch
 # The Pelican origin image happens to carry them already, which is why
 # Containerfile.runtime needs no EPEL and this does.
 RUN dnf -y install epel-release \
- && dnf -y install \
+ && dnf -y install socat \
       ${MDSPLUS_REPO}/mdsplus-kernel_bin-${MDSPLUS_VERSION}.el9.x86_64.rpm \
       ${MDSPLUS_NOARCH}/mdsplus-kernel-${MDSPLUS_VERSION}.el9.noarch.rpm \
  && dnf clean all \
@@ -67,11 +67,77 @@ RUN set -eux; \
     test -x /usr/local/mdsplus/bin/mdsip; \
     test -f /usr/local/mdsplus/lib64/libMdsIpTCP.so; \
     test -f /usr/local/mdsplus/tdi/remote/GetManyExecute.fun; \
-    ! ldd /usr/local/mdsplus/lib64/libMdsIpShr.so | grep -q "not found"
+    ! ldd /usr/local/mdsplus/lib64/libMdsIpShr.so | grep -q "not found"; \
+    test -x /usr/bin/socat
+
+# One mdsip PROCESS per connection, spawned by socat.
+#
+# This is not a preference, it is a correctness requirement. `mdsip -m` --
+# documented as "multiple connections each with own context" -- isolates only
+# the TDI context: Connection carries a single `void *tdicontext[6]`, swapped
+# per command by TdiSaveContext/TdiRestoreContext, and there is no
+# TreeSaveContext or TreeSwitchDbid anywhere in mdstcpip. The OPEN TREE is
+# process-global, so under -m concurrent clients silently receive each other's
+# shot data with a success status (measured: 7 of 8 wrong at 8 clients, clean
+# at 1-4, always correct sequentially).
+#
+# socat's `fork` is what makes each connection a fresh process, and therefore a
+# fresh tree context. This is what upstream does too: MDSplus ships
+# rpm/mdsip.socket ("Per-Connection Server", Accept=yes, StandardInput=socket)
+# and rpm/mdsipd.xinetd, and the official mdsplus/mdsplus:tree-server image
+# exists to "give each connection its own private MDSplus process".
+#
+# socat rather than xinetd because xinetd is not packaged for EL9 at all, and
+# rather than busybox inetd -- which is what tree-server uses -- because busybox
+# is a multi-call binary that would drop nc, wget and a second shell into an
+# image whose threat model assumes the client already has code execution.
+#
+# Only now is the --pids-limit rationale true: with one process per connection
+# it is what bounds a fork bomb.
+# The listener. Kept as a file rather than inlined into ENTRYPOINT so the build
+# can assert `fork` is still in it: losing that flag would serve shared tree
+# state again, silently, and only under concurrency.
+#
+#   fork    a new process per accepted connection -- the whole point
+#   nofork  do NOT interpose a socketpair; exec the child directly on the
+#           accepted socket, so it lands on fd 0/1/2 exactly as inetd would.
+#           Without this, socat relays through a pipe and mdsip's getpeername
+#           sees a socketpair instead of the client.
+COPY --chmod=0755 <<'EOF' /usr/local/bin/fdp-mdsip-server
+#!/bin/sh
+exec /usr/bin/socat TCP-LISTEN:8000,fork,reuseaddr \
+     EXEC:/usr/local/bin/fdp-mdsip-connection,nofork
+EOF
+
+COPY --chmod=0755 <<'EOF' /usr/local/bin/fdp-mdsip-connection
+#!/bin/sh
+# The accepted socket arrives on fd 0, 1 AND 2, so mdsip's own diagnostics would
+# be written INTO the protocol stream -- the client sees a failed connect, not a
+# log line. Both must be redirected before exec. Upstream's mdsipd does exactly
+# this. /tmp is the sandbox's only writable mount (tmpfs), so these logs are
+# per-container and deliberately non-persistent.
+#
+# No -m: that flag shares one tree context across every connection.
+exec /usr/local/mdsplus/bin/mdsip -p 8000 -h /etc/mdsip.hosts -c 0 \
+     >>/tmp/mdsip.access 2>>/tmp/mdsip.errors
+EOF
+
+# Checked after the scripts exist, not with the MDSplus checks above.
+RUN set -eux; \
+    test -x /usr/local/bin/fdp-mdsip-server; \
+    test -x /usr/local/bin/fdp-mdsip-connection; \
+    `# fork+nofork are the whole fix -- a build that lost either would serve` \
+    `# shared tree state again, silently and only under concurrency.` \
+    grep -q 'fork,reuseaddr' /usr/local/bin/fdp-mdsip-server; \
+    grep -q 'nofork' /usr/local/bin/fdp-mdsip-server; \
+    if grep -qE '(^|[[:space:]])-m([[:space:]]|$)' /usr/local/bin/fdp-mdsip-connection; then \
+        echo "FATAL: mdsip -m is back. It shares ONE tree context across all" >&2; \
+        echo "connections, so concurrent clients silently read each other's" >&2; \
+        echo "shots. See the comment above this stage." >&2; \
+        exit 1; \
+    fi
 
 USER mdsip
 EXPOSE 8000
 
-# -m forks a process per connection, so one client's crash, hang or memory hog
-# is its own. Combined with --pids-limit this is what bounds a fork bomb.
-ENTRYPOINT ["/usr/local/mdsplus/bin/mdsip", "-m", "-p", "8000", "-h", "/etc/mdsip.hosts"]
+ENTRYPOINT ["/usr/local/bin/fdp-mdsip-server"]

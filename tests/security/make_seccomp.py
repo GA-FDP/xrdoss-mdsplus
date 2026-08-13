@@ -99,6 +99,32 @@ IO_AND_PROCESS = [
     "execveat",
 ]
 
+# The entrypoint is now xinetd, which forks and execs one mdsip PER CONNECTION,
+# rather than a single long-lived `mdsip -m`. That was a correctness fix -- `-m`
+# shares one tree context across all connections -- but it changes the syscall
+# shape of the container from "one process that accepts" to "a supervisor that
+# spawns", so the profile has to cover the spawn path.
+#
+# fork/vfork are here even though glibc's fork() routes through clone: the
+# profile is an allowlist and the cost of being wrong is a server that accepts a
+# connection and then cannot serve it. setuid/setgid/setgroups are for xinetd's
+# mandatory `user` attribute; it is the account we already run as, so the calls
+# are no-ops, but they are still made and a denial DISABLES the service.
+#
+# NOTE: this list is reasoned, not observed. Re-run tests/security/
+# capture_syscalls.sh against the xinetd entrypoint to replace it with a
+# measured set -- the capture that produced OBSERVED predates this change and
+# never saw a spawn.
+SPAWNER = [
+    "fork", "vfork",
+    "setuid", "setgid", "setgroups", "setresuid", "setresgid",
+    "getgroups", "getresuid", "getresgid",
+    "getpgrp", "getppid", "getpriority", "setpriority",
+    "rt_sigsuspend", "sigaltstack",
+    "getrlimit", "prlimit64",
+    "umask",
+]
+
 # --------------------------------------------------------------------------
 # Deliberately absent, and why. These are what the profile is FOR: each is a
 # well-trodden step in container escape, privilege escalation, or kernel
@@ -110,7 +136,7 @@ IO_AND_PROCESS = [
 #   keyctl add_key request_key                      kernel keyring
 #   init_module finit_module delete_module          load kernel code
 #   kexec_load kexec_file_load reboot               replace or stop the kernel
-#   setuid setgid setreuid setregid setgroups       change identity
+#   setreuid setregid                               change identity
 #   capset                                          acquire capabilities
 #   swapon swapoff quotactl acct                    privileged sysadmin
 #   settimeofday clock_settime adjtimex              move the clock
@@ -118,14 +144,21 @@ IO_AND_PROCESS = [
 #   seccomp                                          re-arm the filter
 #   open_by_handle_at name_to_handle_at              bypass path resolution
 #
-# setuid and friends are safe to deny here because runc sets the uid BEFORE
-# applying seccomp, and no-new-privileges already blocks regaining privilege.
-# Validation catches it if that ordering is ever wrong: the container simply
-# would not start.
+# setuid/setgid/setgroups USED to be denied here, on the reasoning that runc
+# sets the uid before applying seccomp so nothing legitimate needed them. That
+# stopped being true when the entrypoint became xinetd: its mandatory `user`
+# attribute makes it call them, and a denial DISABLES the service rather than
+# failing loudly. They are allowed in SPAWNER now.
+#
+# That is not a weakening. The container runs as a non-root uid with
+# --cap-drop=ALL, so without CAP_SETUID these calls can only ever move to the
+# uid the process already has; and --security-opt=no-new-privileges is what
+# actually blocks regaining privilege, not this list. setreuid/setregid stay
+# denied because nothing here calls them.
 # --------------------------------------------------------------------------
 
 def build():
-    allowed = sorted(set(OBSERVED) | set(GLIBC_VARIANTS) | set(IO_AND_PROCESS))
+    allowed = sorted(set(OBSERVED) | set(GLIBC_VARIANTS) | set(IO_AND_PROCESS) | set(SPAWNER))
     return {
         "defaultAction": "SCMP_ACT_ERRNO",
         # EPERM rather than killing the process: a syscall this list missed

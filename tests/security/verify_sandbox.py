@@ -176,8 +176,14 @@ expect_shell_works("no effective capabilities",
 expect_shell_fails("no setuid binaries to escalate with",
                    "find /usr /bin /sbin -perm -4000 -type f 2>/dev/null | grep -q .",
                    "no-new-privileges blocks the escalation; removing the targets is belt and braces")
+# Tests the property, not the entrypoint's name. This used to assert
+# `cat /proc/1/comm = mdsip`, which broke the moment the entrypoint became a
+# per-connection spawner -- PID 1 is socat now -- while the isolation it was
+# meant to check was never affected. The host has ~1400 processes; inside its
+# own namespace the sandbox sees about 5, and every extra one is a live
+# connection.
 expect_shell_works("own pid namespace",
-                   "test $(cat /proc/1/comm) = mdsip",
+                   "test $(ls -d /proc/[0-9]* 2>/dev/null | wc -l) -lt 50",
                    "sharing the host pid namespace would expose every other process")
 
 # --- resources ----------------------------------------------------------
