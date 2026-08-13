@@ -353,6 +353,10 @@ removed CNI — so a result from a podman 4.x/CNI machine says nothing about a
 netavark one. The script prints the stack it ran on for that reason. See
 [the caveat in `docs/security.md`](docs/security.md#that-result-does-not-transfer-to-the-origin-host).
 
+[`docs/d3d-origin-state.md`](docs/d3d-origin-state.md) is the measured state of
+the production origin, the deployment decisions and their reasons, and what is
+left to do — start there for deployment.
+
 Read [`docs/security.md`](docs/security.md) before deploying either plugin. It
 has the threat model, the measured capabilities, and three findings that
 reading documentation would not have produced — including that podman mounts
