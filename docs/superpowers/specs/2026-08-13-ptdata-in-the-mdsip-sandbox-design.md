@@ -1,92 +1,168 @@
 # PTData in the mdsip sandbox
 
-**Status:** design, approved 2026-08-13. Not yet implemented.
+**Status:** design, revised 2026-08-13 after measuring real `ical` usage. Not
+yet implemented.
+
+**This spans two repos and wants two implementation plans, in order:**
+
+1. **`ptdata`** — `CalibrationMode::Volts` (`ical=2`) plus the non-variadic C
+   entry points the TDI wrapper calls. Self-contained, unit-testable, and
+   useful on its own.
+2. **`xrdoss-mdsplus`** — the sandbox: TDI functions, the modern
+   `PTDATA2`/`PTHEAD2`, mounts, index configuration, tests.
+
+Plan 2 cannot be verified without plan 1, since the equivalence tests need
+`ical=2`.
 
 ## The problem
 
-DIII-D trees contain nodes whose data is fetched by an embedded TDI call —
-`PTDATA2(\ECPTNAM[F][i], $SHOT, 4)` and similar. The `ece` tree alone has 96 of
-them. In the sandbox those nodes fail today, and they fail for two independent
+DIII-D trees fetch data through embedded TDI calls — `PTDATA2(\ECPTNAM[i],
+$SHOT, 4)` and similar. Those nodes fail in the sandbox, for two independent
 reasons.
 
-**The functions are missing.** The sandbox installs the upstream MDSplus RPM
-(7.158-2), which ships 182 `.fun` files and none of DIII-D's. The site functions
-— 119 of them, including `ptdata2.fun`, `pthead2*.fun` and `ptdata_library.fun`
-— live in `DIII-D/css-d3d-mdsplus` under `tdi/`, which production's `MDS_PATH`
-points at. Without them a node calling `PTDATA2` fails with
-`%TDI-E-UNKNOWN_VAR`, the same failure the Containerfile already guards against
-for `GetManyExecute.fun`.
+**The functions are missing.** The sandbox installs the upstream MDSplus RPM,
+which ships 182 `.fun` files and none of DIII-D's. The site functions live in
+`DIII-D/css-d3d-mdsplus` under `tdi/`, which production's `MDS_PATH` points at.
 
-**The data is unreachable.** `PTDATA2` reaches data through
-`BUILD_CALL(0, PTDATA_LIBRARY(), "ptdata_", ...)` — an FFI call into a native
-library named by the `PTDATA_LIBRARY` environment variable. The sandbox has no
-such library, and by design no network: `--internal`, `--dns=none`, no outbound
-TCP, all asserted by `tests/security/verify_sandbox.py`.
+**The data is unreachable.** `PTDATA2` calls into a native library named by
+`PTDATA_LIBRARY`, and the sandbox has neither that library nor — by design — a
+network.
 
-## What makes this tractable
+This is not sandbox-only. Reading a PTDATA2-backed node's record from the
+**deployed origin** today fails with `%TDI-E-UNKNOWN_VAR`, because the origin's
+mdsip has no `tdi/d3d` either. Twelve trees are affected.
 
-The origin container mounts `/mnt/beegfs/data` at `/fdp-d3d`, and
-`/fdp-d3d/archives/` contains `mdsplus`, `ptdata`, `index` and `incoming`. The
-ptdata shotfiles and their indexes are therefore on the **origin host's local
-filesystem**, beside the tree archive the sandbox already bind-mounts read-only.
+## What the trees actually do
 
-`ptdata` builds its shared library with an option:
+Measured by decompiling stored node records offline across three campaigns.
+Offline on purpose: reading a record through mdsip makes the *server* evaluate
+it, which is precisely what fails today.
 
-```cmake
-option(PTDATA_WITH_FDPIO "Enable libfdpio backend" ON)
+| Shot | Era | Calls | `ical` values |
+|---|---|---|---|
+| 198873 | 2024 | 417 | default (1), 4 |
+| 160062 | ~2015 | 752 | default (1), 4, **2** |
+| 140054 | ~2010 | 544 | default (1), 4, **2** |
+
+Across ~1,700 calls spanning 14 years the set is **`{1, 2, 4}`**. `ical=3`,
+`10–19` and `20` never appear. `ical` is omitted in the large majority of calls,
+and `ptdata2.fun` defaults it to 1 (`IF (NOT PRESENT(_ical)) _ical = 1;`).
+
+Two cautions this measurement earned:
+
+- **String counts lie.** `bci` shows 960 `PTDATA2` strings in its 2024 datafile
+  and decompiles to **zero** calls — it embedded them in 2015 (80 calls) and
+  stopped, leaving heap residue. Only decompilation gives a true count.
+- **The tree list is biased to the present.** Candidate trees came from a 2024
+  sweep; `bcixp`, `llama` and `rfdev` do not exist for the older shots. A tree
+  retired before 2024 would not appear at all, so `{1, 2, 4}` is well-supported
+  but not provably exhaustive.
+
+## Architecture: a thin TDI wrapper over the modern C++
+
+Rather than shipping the legacy `ptdata2.fun` and libd3's `index_plugin.c`, the
+sandbox gets its own `PTDATA2`/`PTHEAD2` that are thin wrappers over
+`ptd3d`'s `PtDataReader`.
+
+`PtDataReader::fetch()` already returns what a signal needs:
+
+```cpp
+struct ExtractedData {
+    std::vector<double> data;
+    std::vector<double> times;   // milliseconds -- the convention TDI wants
+    std::string units;
+    std::vector<int> shape;
+    bool data_revised;  bool fewer_points;  int n_over, n_under;
+};
 ```
 
-With it OFF the library builds "without remote file support" and links only
-`${CMAKE_DL_LIBS}`. `io/local_io_provider.cpp` is compiled unconditionally;
-`io/fdpio_io_provider.cpp` only when the option is ON. So a ptdata built for the
-sandbox is *physically incapable* of remote I/O — the no-network property holds
-by construction, not only by network policy.
+and `ReaderConfig` takes an `IndexPlugin*` — the **modern C++** plugin
+(`index_plugin.h`, `json_index_plugin.h`), not the legacy C loader. Three
+reasons this is better than wrapping the legacy stack:
 
-## Decisions
+1. **No `index_plugin.c`.** The bit-rot risk is avoided rather than tolerated.
+2. **Logic becomes testable.** `ptdata2.fun` does header parsing and npts
+   arithmetic in TDI — where the fork has already had to fix a bug ("missing
+   `||` operators in ptdata2.fun IF condition"). In C++ that is unit-testable.
+3. **We own the error semantics.** The site function passes through only
+   `{0, 2, 31, 33}` and returns `[0]` for everything else, so a not-found
+   (`RMS_FNF`, `0x18292`) reaches the client as an empty array with no error.
+   Owning the wrapper lets a genuine failure be a genuine failure.
 
-| Question | Decision | Why |
-|---|---|---|
-| Shot coverage | Archived shots only | Keeps the sandbox network-free; recent-shot access would mean reopening the exfiltration channel the sandbox exists to close |
-| TDI function source | `DIII-D/css-d3d-mdsplus`, pinned ref | It is what production's `MDS_PATH` uses; the fork's `tdi/d3d` is a mirror that has already drifted once |
-| Function scope | All of `tdi/`, not the ptdata subset | These functions call each other; a missing one fails as `%TDI-E-UNKNOWN_VAR` at query time |
-| Shotfile resolution | Index only, no `SYS_D3` scan | A directory scan is too slow |
-| Index path format | POSIX resolution trick (below) | Contained entirely in the sandbox; no cross-repo change on the path to deployment |
-| ptdata floor | `>=2.0.15` | That release initialises `ier=0` in `ptfile()`, fixing a `PTSEARCH0` infinite loop in `SYS_D3`-less environments — and this deployment is `SYS_D3`-less |
+### Prerequisite: `CalibrationMode::Volts`
 
-## Design
+```cpp
+enum class CalibrationMode { Raw = 0, Full = 1, Linear = 4 };   // today
+```
 
-### 1. TDI functions
+`ical=2` is used by `spectroscopy` and `d3d` on historical shots and is not
+implemented. **This must land in the `ptdata` repo before the wrapper is
+useful**, or those nodes are wrong for exactly the archived shots this origin
+exists to serve. It is one mode, not the full legacy surface.
 
-Clone `DIII-D/css-d3d-mdsplus` at a pinned ref during the image build, copy
-`tdi/` to `/usr/local/d3d/tdi`, and extend `MDS_PATH` with all six directories:
+### The C entry point
+
+TDI reaches native code through `BUILD_CALL`, and TDI's FFI **cannot call
+variadic functions** — it returns -1 silently. The entry points must therefore
+be plain non-variadic C. Shape (exact signature to be settled in the plan):
+
+- a header call returning sizes and metadata, mirroring `PTHEAD2`
+- a fetch call filling caller-allocated `data` / `times` buffers, returning an
+  explicit status
+
+The TDI side then does only `MAKE_SIGNAL(_data, *, MAKE_DIM(*,
+MAKE_WITH_UNITS(_times,"ms")))`. Keeping signal assembly in TDI means the C++
+never links MDSplus.
+
+The wrapper must preserve the public signature, since trees call it positionally:
 
 ```
-/usr/local/d3d/tdi
+PUBLIC FUN PTDATA2(IN _pointname, OPTIONAL IN _shot, OPTIONAL IN _ical,
+                   OPTIONAL OUT _error, OPTIONAL IN _double)
+```
+
+## TDI function installation
+
+Clone `DIII-D/css-d3d-mdsplus` at a pinned ref during the image build and copy
+`tdi/` to `/usr/local/d3d/tdi`. All ~100 non-ptdata functions are used as-is;
+only `PTDATA2`/`PTHEAD2` are replaced.
+
+`MDS_PATH` is searched in order, first match wins, so our directory goes
+**first**:
+
+```
+/usr/local/fdp/tdi          <- our modern PTDATA2/PTHEAD2
+/usr/local/d3d/tdi          <- css-d3d-mdsplus, everything else
 /usr/local/d3d/tdi/ptdata
 /usr/local/d3d/tdi/ptdata2
 /usr/local/d3d/tdi/ptdata_historic
 /usr/local/d3d/tdi/global
 /usr/local/d3d/tdi/nimrod
+/usr/local/mdsplus/tdi
+/usr/local/mdsplus/tdi/remote
 ```
 
-`MDS_PATH` is a flat list, not recursive. Naming only the parent resolves
-`PTDATA2` while leaving `PTHEAD2` unresolved — a partial install that looks like
-a data problem rather than a packaging one.
+`MDS_PATH` is a flat list, not recursive — naming only a parent resolves
+`PTDATA2` while leaving `PTHEAD2` unresolved, a partial install that presents as
+a data problem rather than a packaging one. The legacy `PTDATA()`/`PTHEAD*()`
+shims delegate to `PTDATA2`, so they pick up our implementation for free.
 
-### 2. The ptdata library
+Shadowing rather than deleting keeps the override explicit and reversible:
+removing one `MDS_PATH` entry restores production behaviour exactly.
 
-A multi-stage build compiles `libptd3d.so` and `libjson_index_plugin.so` with
-`-DPTDATA_WITH_FDPIO=OFF`, and copies **only** the shared objects into the
-runtime image. No compiler, no `libfdpio2`, no XRootD reaches the sandbox.
+## Data access
 
-```
-PTDATA_LIBRARY   /usr/local/ptdata/lib/libptd3d.so
-```
+Built with `-DPTDATA_WITH_FDPIO=OFF`, `libptd3d.so` links only `${CMAKE_DL_LIBS}`
+— it is *physically incapable* of remote I/O, so the sandbox's no-network
+property holds by construction rather than only by policy. A multi-stage build
+copies just the shared objects into the runtime image; no compiler, no
+`libfdpio2`, no XRootD. The floor is **whichever release adds
+`CalibrationMode::Volts`** (see Prerequisite); it must in any case be
+`>=2.0.15`, the release that initialises `ier=0` in `ptfile()` and so fixes a
+`PTSEARCH0` infinite loop in `SYS_D3`-less environments — and this deployment is
+`SYS_D3`-less.
 
-Verify at build time whether `libgfortran` is required at runtime; the ptdata
-test targets link it explicitly.
-
-### 3. Index-based resolution
+Resolution is **index only**; a directory scan is too slow.
 
 ```
 PTDATA_PLUGIN_LIB          /usr/local/ptdata/lib/libjson_index_plugin.so
@@ -94,130 +170,118 @@ PTDATA_JSON_INDEX_DIR      /ptdata-index
 PTDATA_JSON_INDEX_PATTERN  json_indexes_*
 ```
 
-The plugin reads `<index_dir>/<shot/100>/<shot>.json` through an `IoProvider`;
-with fdpio compiled out that is `LocalIoProvider`, plain POSIX I/O.
-
-### 4. Mounts
-
 Two additional read-only bind mounts, mirroring the existing tree mount:
 
 | Host | Container | Contents |
 |---|---|---|
-| `/mnt/beegfs/data/archives/ptdata` | `/fdp-archives/archives/ptdata` | shotfiles (`ptdata1`, `ptdata2`, … `ptdatae`) |
-| `/mnt/beegfs/data/archives/index/json` | `/ptdata-index` | `json_indexes_<timestamp>/` snapshots |
+| `/mnt/beegfs/data/archives/ptdata` | `/fdp-archives/archives/ptdata` | shotfiles |
+| `/mnt/beegfs/data/archives/index/json` | `/ptdata-index` | index snapshots |
 
-The shotfile mount is deliberately nested under `/fdp-archives/archives/ptdata`
-rather than somewhere flat: §5's symlink points at `/fdp-archives`, and the path
-below it has to match what the index records. Mounting only `.../ptdata` (rather
-than its parent) keeps the rest of `/mnt/beegfs/data` out of the sandbox.
-
-The index needs no such treatment. `PTDATA_JSON_INDEX_DIR` is a value we set
-ourselves, so it is an ordinary local path; only the shotfile locations *inside*
-the index entries carry Pelican URLs.
+The shotfile mount is nested to match what the index records (see below).
+Mounting only `.../ptdata` keeps the rest of `/mnt/beegfs/data` out of the
+sandbox. The index needs no such treatment: `PTDATA_JSON_INDEX_DIR` is a value we
+set ourselves.
 
 `site.env` gains the host paths and the environment block, in the same shape as
-`ARCHIVE_ROOT` and `MDSIP_TREE_ENV`, so the deployment stays described in one
-file.
+`ARCHIVE_ROOT` and `MDSIP_TREE_ENV`.
 
-### 5. The Pelican-path workaround — REVISIT THIS
+## The Pelican-path workaround — REVISIT THIS
 
-Index entries record **absolute Pelican URLs**, not paths:
+Index entries record **absolute Pelican URLs**:
 
 ```json
 ".PCE": "pelican://osg-htc.org:443/fdp-d3d/archives/ptdata/ptdatac/19887x/198873.PCE"
 ```
 
 `LocalIoProvider::resolve()` returns its argument unchanged, so that string
-reaches `::open()` verbatim and fails.
+reaches `::open()` verbatim.
 
-The workaround exploits POSIX path resolution and needs no code anywhere. The
-string does not begin with `/`, so it is a **relative** path, and POSIX collapses
-consecutive slashes. With the working directory at `/`, it resolves as:
-
-```
-/pelican:/osg-htc.org:443/fdp-d3d/archives/ptdata/ptdatac/19887x/198873.PCE
-```
-
-So the image carries that directory chain, with the final component a symlink to
-the root the index paths are relative to:
+The workaround needs no code. The string does not begin with `/`, so it is a
+**relative** path, and POSIX collapses consecutive slashes — with the working
+directory at `/` it resolves as
+`/pelican:/osg-htc.org:443/fdp-d3d/archives/...`. The image carries that chain,
+its last component symlinked to the root the index paths are relative to:
 
 ```
 /pelican:/osg-htc.org:443/fdp-d3d  ->  /fdp-archives
-/fdp-archives/archives/ptdata          ro mount (§4)
+/fdp-archives/archives/ptdata          ro mount
 ```
 
-The index records `/fdp-d3d/archives/ptdata/...`, so everything below the
-symlink must reproduce that layout — hence the nested mount point rather than a
-flat one.
-
-Verified working: opening the literal URL string succeeds through both `open(2)`
-and Python's `open()` when the chain exists relative to the working directory.
-
-Two requirements follow:
+Verified: opening the literal URL string succeeds through `open(2)` when the
+chain exists relative to the working directory.
 
 - **The working directory must be `/` explicitly.** socat's child inherits
-  socat's cwd. `fdp-mdsip-connection` must `cd /` rather than rely on the image's
-  default `WORKDIR`.
-- **The Pelican hostname and federation prefix are encoded in a directory name.**
-  If either changes, every ptdata lookup fails as "file not found" with nothing
-  pointing at the cause.
+  socat's cwd; `fdp-mdsip-connection` must `cd /` rather than rely on the
+  image's default `WORKDIR`.
+- **The Pelican host and federation prefix are encoded in a directory name.** If
+  either changes, every lookup fails as "file not found" with nothing pointing
+  at the cause.
 
-> **Return to this.** The real fix is to make the indexer record paths relative
-> to the archive root (`archives/ptdata/...`) and have each consumer prepend its
-> own root — which is effectively what Pelican clients already do. That removes
-> the trick, removes the hostname from the image, and makes the index portable
-> between access methods. It was deferred because it requires regenerating the
-> index and updating its consumers, which is not on the path to this deployment.
+> **Return to this.** The real fix is for the indexer to record archive-relative
+> paths, with each consumer prepending its own root. Deferred because it needs
+> the index regenerated and its consumers updated.
+
+## Error semantics
+
+Owning the wrapper means choosing these deliberately rather than inheriting
+them:
+
+| Condition | Behaviour |
+|---|---|
+| Pointname legitimately absent for the shot | Return empty — matches what `PTDATA2` users already expect, and what production does |
+| Shot absent from the index | Return empty, indistinguishable from the above (see Accepted consequences) |
+| Unsupported `ical` | **Raise.** Never silently substitute a different calibration |
+| Unreadable shotfile, malformed header, index unreadable | **Raise** |
+
+The distinction is between "there is no data" and "I could not get the data".
+The legacy function collapses both into `[0]`; this one does not. Silently
+substituting a calibration would be the worst available outcome — wrong numbers
+that look right — and is explicitly ruled out.
 
 ## Accepted consequences
 
 **Coverage equals the index's coverage.** A shot whose shotfiles are on disk but
-absent from the index is unavailable. The newest index snapshot observed is
-`json_indexes_2026-06-23`, so the gap is real, not theoretical.
+absent from the index is unavailable. The newest snapshot observed is
+`json_indexes_2026-06-23`, so the gap is real.
 
-**A miss returns empty, not an error.** `ptdata2.fun` passes through only four
-error codes:
-
-```tdi
-IF ( NE(_error,0) && NE(_error,2) && NE(_error,31) && NE(_error,33)) { return([0]); }
-```
-
-Anything else yields `[0]`. That function is site code we do not own, so a miss
-reaches the client as an empty array rather than an exception. Considered and
-accepted; a staleness signal was explicitly dropped from scope.
+**Our `PTDATA2` is a drop-in for tree-embedded calls, not for every call.** A
+user calling `PTDATA2` interactively with `ical=3`, `10–19` or `20` gets an
+error where production would answer. No tree measured uses those, and the
+sandbox supports none of them today, so this is a strict improvement — but it is
+a divergence and belongs on the record.
 
 ## Security
 
-Posture is unchanged.
-
-- The data added is already inside the boundary: any token holder may read
-  everything under `/fdp-d3d/archives` read-only, so a client with code execution
-  in the sandbox gains nothing it could not already fetch through the origin.
-- Both new mounts are read-only.
-- No network is added, and the ptdata library is built unable to open one.
-- No new syscalls: this is file I/O the profile already permits. The seccomp
-  capture should still be re-run — it is owed for the socat entrypoint anyway.
+Unchanged posture. The data added is already inside the boundary — any token
+holder may read everything under `/fdp-d3d/archives` read-only, so a client with
+code execution in the sandbox gains nothing it could not already fetch through
+the origin. Both new mounts are read-only, no network is added, and the ptdata
+library is built unable to open one. No new syscalls; the seccomp capture should
+still be re-run, which is owed for the socat entrypoint regardless.
 
 ## Testing
 
-- A fixture tree node with an embedded `PTDATA2()` call, so the existing
-  sandboxed e2e covers the real path end to end.
+- A fixture tree node with an embedded `PTDATA2()` call, so the sandboxed e2e
+  covers the real path end to end.
+- Per-`ical` equivalence against the legacy implementation for `{1, 2, 4}` —
+  same pointname, same shot, same numbers. This is the check that makes
+  replacing site code defensible.
 - A check that fails loudly when `MDS_PATH` resolves `PTDATA2` but not its
-  helpers — the partial-install case, which otherwise presents as missing data.
-- A check that the Pelican-path chain resolves, and that it fails *loudly* if the
-  working directory is not `/`. This is the fragile part of the design and
-  deserves a test that names it. Note when writing it: the symlink is absolute
-  (`-> /fdp-archives`), which only resolves inside the container where that path
-  exists at the root. A test running on the host must either exercise it through
-  the container or use a relative symlink; a host test with the absolute one
+  helpers.
+- A check that the Pelican-path chain resolves, and fails loudly if the working
+  directory is not `/`. Note when writing it: the symlink is absolute, so it
+  only resolves inside the container; a host test needs a relative symlink or it
   fails with `ENOENT` for reasons unrelated to the design.
-- The existing no-network assertions must still pass with ptdata present, and
-  the built `libptd3d.so` must have no `libfdpio2` or `libXrd*` in its `NEEDED`
-  entries — the same `readelf` check the packaging uses, for the same reason.
+- `readelf` assertions that the built `libptd3d.so` has no `libfdpio2` or
+  `libXrd*` in `NEEDED`, and that the existing no-network checks still pass with
+  ptdata present.
 
 ## Follow-ups
 
-1. Make the indexer record archive-relative paths and retire §5's trick.
-2. Re-run `tests/security/capture_syscalls.sh` against the socat entrypoint.
-3. Consider whether `toksearch`'s `MdsSignal` should surface "empty result from a
-   PTDATA2-backed node" distinctly, given the swallowed-error behaviour above.
+1. `CalibrationMode::Volts` (`ical=2`) in the `ptdata` repo — a prerequisite,
+   not a follow-up, but tracked there.
+2. Make the indexer record archive-relative paths and retire the trick above.
+3. Re-run `tests/security/capture_syscalls.sh` against the socat entrypoint.
+4. `rfdev_160062.tree` was reported "Corrupted/truncated" during the survey.
+   Unverified whether that is a bad file on the origin or a download artefact;
+   there is precedent for corrupt archive files. Worth a separate look.
