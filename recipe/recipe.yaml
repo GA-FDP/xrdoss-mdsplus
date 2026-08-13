@@ -1,0 +1,173 @@
+# Two packages from one source tree, because they have opposite audiences and
+# disjoint dependencies:
+#
+#   mdsip-fdp      the CLIENT half. Anyone with an MDSplus thin client.
+#                  Needs MDSplus and curl; no XRootD, no Pelican, no token
+#                  plumbing. This is the light install the fdp:// scheme exists
+#                  to make possible.
+#
+#   xrdhttp-mdsip  the SERVER half. Origin administrators only.
+#                  Needs XRootD; deliberately no MDSplus -- the relay speaks
+#                  mdsip over a socket and never links an MDSplus library.
+#
+# CMake builds each independently (-DBUILD_CLIENT / -DBUILD_RELAY), so neither
+# package's build environment has to contain the other's dependencies.
+
+context:
+  # Set by build_package.sh from `git describe`, versioneer-style.
+  version: ${{ env.get("PKG_VERSION", default="0.0.0") }}
+
+recipe:
+  name: xrdoss-mdsplus
+  version: ${{ version }}
+
+source:
+  path: ..
+
+outputs:
+  # --------------------------------------------------------------------------
+  - package:
+      name: mdsip-fdp
+
+    build:
+      number: 0
+      script: build-client.sh
+
+    requirements:
+      build:
+        - ${{ compiler('cxx') }}
+        - ${{ stdlib('c') }}
+        - cmake
+        - make
+      host:
+        # Two variants are built, one against each MDSplus provider. They are
+        # the same binary; only the metadata differs. conda-forge's `mdsplus`
+        # and ga-fdp's `mdsplus-xrdcl` both install libMdsIpShr.so to the same
+        # path, so they cannot coexist -- and an fdp-core environment has the
+        # fork while a standalone user has the stock package. A variant per
+        # provider lets the solver pick, instead of forcing one on everybody.
+        - ${{ mdsplus_impl }}
+        - libcurl
+      run:
+        - ${{ mdsplus_impl }}
+
+    tests:
+      - script:
+          content:
+            # The name is load-bearing. MDSplus's LoadIo() builds the image name
+            # from the URL scheme -- "MdsIp" + "FDP" -- so a version suffix, the
+            # convention for the XRootD plugin below, would make it unloadable.
+            - test -f $PREFIX/lib/libMdsIpFDP.so
+            - test ! -e $PREFIX/lib/libMdsIpFDP-5.so
+            # The light-install claim: MDSplus and curl, no XRootD. Match on
+            # NEEDED entries rather than ldd output, whose resolved paths
+            # contain the package name and match almost any pattern.
+            - readelf -d $PREFIX/lib/libMdsIpFDP.so | grep NEEDED
+            - "! readelf -d $PREFIX/lib/libMdsIpFDP.so | grep NEEDED | grep -qE 'libXrd'"
+            - python test_transport.py
+          env:
+            # Empty when the secret is unavailable (forks, offline builds), in
+            # which case the live half self-skips and the offline half still runs.
+            BEARER_TOKEN: ${{ env.get("BEARER_TOKEN", default="") }}
+            FDP_TEST_URL: ${{ env.get("FDP_TEST_URL", default="") }}
+        requirements:
+          run:
+            - python
+            - binutils
+            - ${{ mdsplus_impl }}
+        files:
+          recipe:
+            - test_transport.py
+
+    about:
+      homepage: https://github.com/GA-FDP/xrdoss-mdsplus
+      license: Apache-2.0
+      license_file: LICENSE
+      summary: MDSplus thin-client transport for the Fusion Data Platform (fdp://)
+      description: |
+        An MDSplus IoRoutines transport that reaches FDP-hosted data over HTTPS,
+        so existing thin-client code changes one string and nothing else:
+
+            conn = MDSplus.Connection('fdp://d3d-origin.gat.com:8443/mdsip')
+            conn.openTree('efit01', 190000)
+            conn.get(r'\ipmhd')
+
+        MDSplus loads the library itself from the URL scheme. Requests are
+        tunnelled to an mdsip server behind a Pelican origin, which produces
+        every byte returned -- nothing is interpreted or reimplemented here.
+
+        Authenticates with a bearer token from $BEARER_TOKEN or ~/.fdp/token,
+        the same precedence the fdp CLI uses.
+      repository: https://github.com/GA-FDP/xrdoss-mdsplus
+
+  # --------------------------------------------------------------------------
+  - package:
+      name: xrdhttp-mdsip
+
+    build:
+      number: 0
+      script: build-relay.sh
+
+    requirements:
+      build:
+        - ${{ compiler('cxx') }}
+        - ${{ stdlib('c') }}
+        - cmake
+        - make
+      host:
+        # Pinned <6 for the same reason as libfdpio2: this is a v5 plugin, and
+        # the Pelican origin image it loads into ships XRootD 5.9.x. Building
+        # against 6 would produce something that image cannot load.
+        - xrootd <6
+      run:
+        - xrootd <6
+
+    tests:
+      - script:
+          content:
+            # The reverse of the client's naming rule: XrdOucPinLoader appends
+            # the plugin version, so the file on disk carries -5 and the xrootd
+            # config must reference the UNSUFFIXED name. Shipping the
+            # unsuffixed file too would make the config ambiguous.
+            - test -f $PREFIX/lib/libXrdHttpMdsip-5.so
+            - test ! -e $PREFIX/lib/libXrdHttpMdsip.so
+            # The entry point XRootD resolves. Absent it, the plugin loads and
+            # then does nothing, which is the failure that looks like success.
+            - nm -D --defined-only $PREFIX/lib/libXrdHttpMdsip-5.so | grep -qw XrdHttpGetExtHandler
+            # It must not have picked up MDSplus. That is the design claim, and
+            # a stray link would only surface as a missing library on an origin
+            # that has no MDSplus installed.
+            #
+            # NEEDED entries, not ldd output: ldd prints resolved paths, and the
+            # build directory is named after the package -- so `grep -i mds`
+            # against it matches "xrdhttp-mdsip" and fails a binary that is
+            # perfectly clean. (It did, on the first run.)
+            - readelf -d $PREFIX/lib/libXrdHttpMdsip-5.so | grep NEEDED
+            - "! readelf -d $PREFIX/lib/libXrdHttpMdsip-5.so | grep NEEDED | grep -qE 'libMds|libTdiShr|libTreeShr'"
+        requirements:
+          run:
+            - binutils
+
+    about:
+      homepage: https://github.com/GA-FDP/xrdoss-mdsplus
+      license: Apache-2.0
+      license_file: LICENSE
+      summary: XRootD HTTP extension handler relaying mdsip over an origin's HTTPS port
+      description: |
+        An XrdHttpExtHandler that relays the MDSplus mdsip protocol over a
+        Pelican origin's existing HTTPS port, so thin clients reach MDSplus
+        data through the same endpoint and the same bearer token as everything
+        else on the origin.
+
+        It links no MDSplus library: sessions are byte pipes to a separately
+        run mdsip server, which should be sandboxed, since an mdsip session is
+        arbitrary code execution.
+
+        Because an XRootD extension handler runs BEFORE XRootD's own
+        authorization, the handler delegates authorization itself -- configure
+        it with auth=xrootd and an authpath, or it will answer anyone.
+      repository: https://github.com/GA-FDP/xrdoss-mdsplus
+
+extra:
+  recipe-maintainers:
+    - sammuli

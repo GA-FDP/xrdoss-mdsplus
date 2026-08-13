@@ -27,6 +27,30 @@ name makes it search for `-5-5.so` and only succeed via a fallback. The client
 transport is the exact reverse — `libMdsIpFDP.so` must be named precisely that,
 because MDSplus resolves it from the URL scheme.
 
+## Installing
+
+Two of the three ship as conda packages on `ga-fdp`. For a client, that is the
+whole install:
+
+```bash
+conda install -c ga-fdp -c conda-forge mdsip-fdp
+```
+
+```python
+from MDSplus import Connection
+conn = Connection('fdp://fdp-d3d-origin.nationalresearchplatform.org:8443/mdsip')
+conn.openTree('efit01', 198873)
+conn.get(r'\ipmhd')
+```
+
+No `LD_LIBRARY_PATH`, no XRootD, no Pelican — MDSplus finds the transport
+because the package installs it alongside `libMdsShr.so`, whose `RPATH` is
+`$ORIGIN/.`. A bearer token comes from `$BEARER_TOKEN` or `~/.fdp/token`.
+
+The relay is `xrdhttp-mdsip` (origin administrators only). The virtual-file
+plugin is not packaged — it has no deployment yet. See
+[docs/packaging.md](docs/packaging.md).
+
 The rest of this document covers the virtual-file plugin first, since it is
 where the design work is; the relay has its own section further down:
 [The other half](#the-other-half-mdsip-tunnelled-over-the-same-port).
