@@ -30,4 +30,7 @@ sandbox-verify = "bash tests/security/verify_sandbox.sh"
 seccomp-gen = "python tests/security/make_seccomp.py deploy/mdsip-seccomp.json"
 syscall-capture = "bash tests/security/capture_syscalls.sh"
 fed-post = { cmd = "bash tests/fed/probe_federation_post.sh", depends-on = ["build"] }
+# Conda packages. Needs rattler-build on PATH (`pixi global install
+# rattler-build`); it builds in its own environments, not this one.
+package = "bash build_package.sh"
 clean = "rm -rf build"

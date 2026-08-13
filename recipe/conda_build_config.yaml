@@ -1,0 +1,16 @@
+# One variant per MDSplus provider. See the comment on the host requirements in
+# recipe.yaml: the two packages install the same files and so cannot coexist,
+# and both are in use -- fdp-core blesses mdsplus-xrdcl, while a standalone
+# client has conda-forge's mdsplus.
+#
+# Only the mdsip-fdp output references this, so xrdhttp-mdsip builds once.
+mdsplus_impl:
+  - mdsplus
+  - mdsplus-xrdcl
+
+# Match the rest of the FDP stack: built against a glibc old enough for the
+# RHEL 8 machines these run on.
+c_stdlib:
+  - sysroot
+c_stdlib_version:
+  - "2.28"
