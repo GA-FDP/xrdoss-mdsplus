@@ -358,10 +358,17 @@ Two further measurements the `.fun` has to respect:
 - **`ntimes` can be 0.** A point whose DFI has no dedicated handler is served
   by `GenericDfi`, which produces no time base. The `.fun` must cope with a
   zero-length time axis rather than assume `MAKE_DIM` always has something.
-- **Never use `VAL()`.** TDI's `VAL()` passes the integer itself where the C
-  entry points expect a pointer; the dereference takes SIGSEGV and kills the
-  mdsip connection rather than returning an error. Use `REF()` or a bare
-  argument — both pass a pointer.
+- **Never `VAL()` a value the callee will dereference.** TDI's `VAL()` passes
+  the integer itself where the C entry points expect a pointer; the
+  dereference takes SIGSEGV and kills the mdsip connection rather than
+  returning an error. Pass real arguments with `REF()` or bare — both pass a
+  pointer.
+
+  `VAL(0)` is the deliberate exception: it is how TDI passes a **NULL**
+  pointer, which is what the header entry point's optional sections use
+  (`PTHEAD_RFIX` wants only `rarray`). Safe because the callee guards.
+  Measured, along with a 16-argument call arriving intact — the arity
+  `ptdata_capi_header_copy` needs.
 
 ## Accepted consequences
 
