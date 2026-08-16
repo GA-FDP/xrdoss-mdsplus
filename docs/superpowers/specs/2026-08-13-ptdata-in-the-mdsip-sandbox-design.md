@@ -217,31 +217,60 @@ Two things this changes:
   fourteen are only the directly-called set; each may call further site
   functions in turn, and the transitive closure was not measured.
 
-Also found: **the `mdsplus-xrdcl` fork already vendors the site library** at
-`tdi/d3d/` — 118 `.fun` files, an identical filename set to
-`css-d3d-mdsplus/tdi`. Worth knowing before adding a clone step, since the
-functions may already be reachable through a package we control.
-
 ## TDI function installation
 
-Clone `DIII-D/css-d3d-mdsplus` at a pinned ref during the image build and copy
-`tdi/` to `/usr/local/d3d/tdi`. All ~100 non-ptdata functions are used as-is;
-only `PTDATA2`/`PTHEAD2` are replaced.
+**Upstream MDSplus already packages the DIII-D site library.** Measured
+2026-08-16: `mdsplus-d3d-7.158-2.el9.noarch.rpm`, from the same
+`mdsplus.org/dist/rhel9/stable` repo the image already installs its other two
+RPMs from, is 61 KB, declares no dependencies beyond `rpmlib`, and installs all
+118 `.fun` files to `/usr/local/mdsplus/tdi/d3d` — including every one of the
+fourteen above and the whole `ptdata/` and `ptdata2/` subtrees.
+
+So the install is one more URL on the existing `dnf -y install` line. No clone,
+no vendored copy, no credentials at build time, and nothing for the mdsip
+service account to reach. (The `mdsplus-xrdcl` fork vendors the same 118 files
+at `tdi/d3d/`, and conda-forge's stock `mdsplus` ships them too — the library
+travels with MDSplus itself, not only with the DIII-D site repo.)
+
+**Drift from `css-d3d-mdsplus`, and why it is acceptable.** The RPM's copy is
+not byte-identical to the site checkout: 15 of the 118 differ, and three of
+those are in the needed fourteen — `damphase` (537 calls), `using_signal`
+(161), `loaddata` (113). The other eleven, including the entire `PTHEAD_*`
+family, are identical.
+
+`DAMPHASE` and `LOADDATA` are dispatch-side: both `SPAWN` an `ssh` to a named
+GA host (the two copies disagree about *which* host, which is most of the
+diff). Neither can function in a no-network sandbox under either version, and a
+read-only data server never dispatches the action nodes that call them. The
+drift there is moot.
+
+`USING_SIGNAL` is the one that matters, and the difference is substantive
+rather than cosmetic: the site copy opens the tree explicitly through
+`TreeShr->TreeOpen` and returns `[0]` on failure, while the RPM's uses
+`using(..., _shot, _tree)` and lets TDI resolve it. **Verify this one against a
+real tree during implementation** — it is the only drifted function on the
+data-retrieval path.
+
+The five `ptdata2/` files that differ are ones we replace, so their drift is
+irrelevant by construction.
 
 `MDS_PATH` is searched in order, first match wins, so our directory goes
 **first**:
 
 ```
-/usr/local/fdp/tdi          <- our modern PTDATA2/PTHEAD2
-/usr/local/d3d/tdi          <- css-d3d-mdsplus, everything else
-/usr/local/d3d/tdi/ptdata
-/usr/local/d3d/tdi/ptdata2
-/usr/local/d3d/tdi/ptdata_historic
-/usr/local/d3d/tdi/global
-/usr/local/d3d/tdi/nimrod
+/usr/local/fdp/tdi                       <- our modern PTDATA2/PTHEAD2
+/usr/local/mdsplus/tdi/d3d               <- mdsplus-d3d, everything else
+/usr/local/mdsplus/tdi/d3d/ptdata
+/usr/local/mdsplus/tdi/d3d/ptdata2
+/usr/local/mdsplus/tdi/d3d/ptdata_historic
+/usr/local/mdsplus/tdi/d3d/global
+/usr/local/mdsplus/tdi/d3d/nimrod
 /usr/local/mdsplus/tdi
 /usr/local/mdsplus/tdi/remote
 ```
+
+Those five subdirectories are the RPM's own layout, confirmed from its file
+list, not a guess at one.
 
 `MDS_PATH` is a flat list, not recursive — naming only a parent resolves
 `PTDATA2` while leaving `PTHEAD2` unresolved, a partial install that presents as
