@@ -20,9 +20,11 @@ DIII-D trees fetch data through embedded TDI calls — `PTDATA2(\ECPTNAM[i],
 $SHOT, 4)` and similar. Those nodes fail in the sandbox, for two independent
 reasons.
 
-**The functions are missing.** The sandbox installs the upstream MDSplus RPM,
-which ships 182 `.fun` files and none of DIII-D's. The site functions live in
-`DIII-D/css-d3d-mdsplus` under `tdi/`, which production's `MDS_PATH` points at.
+**The functions are missing.** The sandbox installs `mdsplus-kernel`, which
+ships 182 `.fun` files and none of DIII-D's. Production's `MDS_PATH` points at
+`DIII-D/css-d3d-mdsplus`'s `tdi/`. (Upstream also packages that library as
+`mdsplus-d3d`, which the image does not currently install — see "TDI function
+installation".)
 
 **The data is unreachable.** `PTDATA2` calls into a native library named by
 `PTDATA_LIBRARY`, and the sandbox has neither that library nor — by design — a
@@ -127,8 +129,11 @@ PUBLIC FUN PTDATA2(IN _pointname, OPTIONAL IN _shot, OPTIONAL IN _ical,
 measured against a running MDSplus rather than assumed: `BUILD_CALL(8, ...)`
 delivers an int return, arguments arrive as pointers, text arrives
 NUL-terminated with padding intact, and a `REF()`'d array is filled to its
-full extent. `VAL()` must never be used — it passes the integer where a
-pointer is expected and takes SIGSEGV.
+full extent, at 16 arguments as well as at 7. `VAL()` must not be used for a
+value the callee will dereference — it passes the integer itself and takes
+SIGSEGV — with the single measured exception of `VAL(0)`, which is how TDI
+expresses a NULL pointer. See "Never `VAL()` a value the callee will
+dereference" below.
 
 ### `PTHEAD2` needs a second entry point, and it is the harder one
 
@@ -157,10 +162,18 @@ exists: `ptdata`'s `python/ptdata/header.py` has `_build_legacy_arrays` and
 C++ (so the ABI and Python cannot drift) and expose it through
 `ptdata_capi_header_size` / `ptdata_capi_header_copy`.
 
-One thing to settle rather than assume: `_build_legacy_arrays` produces 50
-slots, while `pthead2.fun` requests 64. Every index observed in use stops at 39,
-and 41-50 hold the VAX `0xFAFAFAFA` sentinel — but `PTHEAD_IFIX` hands the whole
-array to tree code whose subscripts have not been measured.
+**Status: shipped**, as `ptdata_capi_header_size` / `ptdata_capi_header_copy`
+over a C++ `legacy_header::build` that Python's `PtDataHeader` now binds to, so
+the two cannot drift.
+
+A "50 vs 64 slots" question raised here earlier was a misreading and is
+settled: the `64` in `PTHEAD2_IFIX(_pointname, _shot, 64, _error)` is the PTDATA
+**call type**, not a length — `pthead2_ifix.fun` documents that parameter as
+"TYPE - PTDATA call type" and allocates `ZERO(50, 0)` / `ZERO(20, 0.0)`. The
+legacy lengths are 50 and 20. Measured: the highest `iarray` subscript any site
+function applies outside the `ptdata2/` code we replace is 38, and **no stored
+record subscripts a `PTHEAD*` result at all** — records consume the whole
+value.
 
 ### Which TDI functions we own
 
