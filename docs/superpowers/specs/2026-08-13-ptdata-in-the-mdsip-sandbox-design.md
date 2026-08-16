@@ -121,6 +121,51 @@ PUBLIC FUN PTDATA2(IN _pointname, OPTIONAL IN _shot, OPTIONAL IN _ical,
                    OPTIONAL OUT _error, OPTIONAL IN _double)
 ```
 
+## Which site functions are actually needed
+
+Measured 2026-08-16 by `tests/survey_tdi_calls.py`, decompiling every stored
+record across the same 36 trees (12 trees × 3 shots) and classifying every call
+against the MDSplus builtin opcodes, the MDSplus kernel `.fun` set, and
+`css-d3d-mdsplus/tdi`.
+
+Our modern `PTDATA2` needs none of the legacy helpers — the C++ reader handles
+segmentation, PCS timing and calibration internally — so it was worth asking
+whether the site library is needed at all. **It is.** Fourteen site functions
+are called directly from stored records, 1,473 times:
+
+| Function | Calls | Trees |
+|---|---|---|
+| `DAMPHASE` | 537 | d3d |
+| `PTHEAD_REAL32` | 286 | nb, neutrals, spectroscopy |
+| `PTHEAD_RFIX` | 262 | neutrals, spectroscopy |
+| `USING_SIGNAL` | 161 | mhd, transport |
+| `LOADDATA` | 113 | d3d, ece |
+| `MULTIPHASE` | 51 | d3d, mhd |
+| `PTHEAD_ASCII` | 24 | nb |
+| `PTHEAD_IFIX` | 24 | nb |
+| `ECEPROF`, `TECEPROF` | 3 each | ece |
+| `IP_PROBES`, `IP_PROBES_Z` | 3 each | mhd |
+| `SLEEP` | 2 | d3d |
+| `ECHPWRC` | 1 | rf |
+
+Zero unclassified names remain, so the list is complete for this sample.
+
+Two things this changes:
+
+- **The legacy `PTDATA()` shim is the *majority* caller**, not a compatibility
+  afterthought: 1,259 calls against `PTDATA2`'s 1,210. It reaches our
+  implementation only because it delegates, and it pulls the legacy
+  `PTHEAD_*` family (`_REAL32`, `_RFIX`, `_ASCII`, `_IFIX`, 596 calls) with it.
+  Those are separate functions from the `PTHEAD2_*` family and must be present.
+- **Installing the whole `tdi/` tree is right**, not merely convenient. The
+  fourteen are only the directly-called set; each may call further site
+  functions in turn, and the transitive closure was not measured.
+
+Also found: **the `mdsplus-xrdcl` fork already vendors the site library** at
+`tdi/d3d/` — 118 `.fun` files, an identical filename set to
+`css-d3d-mdsplus/tdi`. Worth knowing before adding a clone step, since the
+functions may already be reachable through a package we control.
+
 ## TDI function installation
 
 Clone `DIII-D/css-d3d-mdsplus` at a pinned ref during the image build and copy
@@ -237,6 +282,30 @@ The distinction is between "there is no data" and "I could not get the data".
 The legacy function collapses both into `[0]`; this one does not. Silently
 substituting a calibration would be the worst available outcome — wrong numbers
 that look right — and is explicitly ruled out.
+
+**Measured status codes** (2026-08-16, pinned by `ptdata`'s
+`cpp/tests/test_capi_absent_cases.cpp`; see
+`ptdata/docs/superpowers/plans/2026-08-16-tdi-c-entry-points.md`):
+
+| Condition | Status | Name |
+|---|---|---|
+| Known shot, unknown pointname | 1 | `PointnameNotFound` |
+| Unknown shot | 3 | `ShotNotFound` |
+| Unsupported `ical` | 110 | `InvalidConfiguration` |
+| Buffer larger than the fetch | 200 | `PTDATA_CAPI_BUFFER_TOO_SMALL` |
+| NULL argument / internal error | 201 | `PTDATA_CAPI_INTERNAL` |
+
+So `PTDATA2.fun` returns `[0]` for **{1, 3}** and raises for everything else.
+
+Two further measurements the `.fun` has to respect:
+
+- **`ntimes` can be 0.** A point whose DFI has no dedicated handler is served
+  by `GenericDfi`, which produces no time base. The `.fun` must cope with a
+  zero-length time axis rather than assume `MAKE_DIM` always has something.
+- **Never use `VAL()`.** TDI's `VAL()` passes the integer itself where the C
+  entry points expect a pointer; the dereference takes SIGSEGV and kills the
+  mdsip connection rather than returning an error. Use `REF()` or a bare
+  argument — both pass a pointer.
 
 ## Accepted consequences
 
