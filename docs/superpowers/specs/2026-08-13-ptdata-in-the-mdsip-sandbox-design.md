@@ -121,6 +121,62 @@ PUBLIC FUN PTDATA2(IN _pointname, OPTIONAL IN _shot, OPTIONAL IN _ical,
                    OPTIONAL OUT _error, OPTIONAL IN _double)
 ```
 
+**Status:** the fetch half shipped in `ptdata` as
+`ptdata_capi_size` / `ptdata_capi_copy` (see that repo's
+`docs/superpowers/plans/2026-08-16-tdi-c-entry-points.md`). Its ABI was
+measured against a running MDSplus rather than assumed: `BUILD_CALL(8, ...)`
+delivers an int return, arguments arrive as pointers, text arrives
+NUL-terminated with padding intact, and a `REF()`'d array is filled to its
+full extent. `VAL()` must never be used — it passes the integer where a
+pointer is expected and takes SIGSEGV.
+
+### `PTHEAD2` needs a second entry point, and it is the harder one
+
+The survey above found that `PTHEAD2` is reached 596 times through the legacy
+`PTHEAD_*` shims. Those shims read `PTHEAD2`'s **side effects**, not its return
+value:
+
+```
+PTHEAD_RFIX   → pthead2(...); return(__rarray)
+PTHEAD_REAL32 → pthead2(...); return(__real32[2:*])
+PTHEAD_IFIX   → pthead2(...); return(_ifix)
+PTHEAD_ASCII  → pthead2_ascii(...)
+```
+
+So a modern `PTHEAD2` must set `PUBLIC __iarray`, `__rarray`, `__ascii`,
+`__int16`, `__int32`, `__real32`, `__real64` — the legacy Fortran header
+arrays — not merely return an npts. 548 of those 596 calls depend on the
+globals.
+
+That is a larger legacy surface than the fetch path, but most of it already
+exists: `ptdata`'s `python/ptdata/header.py` has `_build_legacy_arrays` and
+`_build_legacy_var_header_arrays`, written and parity-tested during the
+"PtDataHeader 1.x parity" work. They produce the `iarray`/`rarray` pair and the
+`[n, n, values...]` var-header layout that `pthead2.fun` builds and
+`PTHEAD_REAL32` skips two words into. The work is to move that projection into
+C++ (so the ABI and Python cannot drift) and expose it through
+`ptdata_capi_header_size` / `ptdata_capi_header_copy`.
+
+One thing to settle rather than assume: `_build_legacy_arrays` produces 50
+slots, while `pthead2.fun` requests 64. Every index observed in use stops at 39,
+and 41-50 hold the VAX `0xFAFAFAFA` sentinel — but `PTHEAD_IFIX` hands the whole
+array to tree code whose subscripts have not been measured.
+
+### Which TDI functions we own
+
+Only three reach native code, so only three are ours to write:
+
+| Ours | Comes free (pure TDI on top) |
+|---|---|
+| `PTDATA2` | `PTDATA`, `PTNPTS`, `ECEPROF`, `IP_PROBES`, `IP_PROBES_Z` |
+| `PTHEAD2` | `PTHEAD_IFIX`, `PTHEAD_RFIX`, `PTHEAD_REAL32` |
+| `PTHEAD2_ASCII` | `PTHEAD_ASCII` |
+
+`PTNPTS` is `return(_ifix[31])`; the four `PTHEAD_*` shims are one line each.
+The remaining site functions — `DAMPHASE`, `USING_SIGNAL`, `LOADDATA`,
+`MULTIPHASE`, `TECEPROF`, `ECHPWRC`, `SLEEP`, 866 calls between them — touch
+ptdata not at all and are used as-is.
+
 ## Which site functions are actually needed
 
 Measured 2026-08-16 by `tests/survey_tdi_calls.py`, decompiling every stored
