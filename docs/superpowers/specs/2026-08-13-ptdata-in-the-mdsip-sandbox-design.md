@@ -308,10 +308,22 @@ copies just the shared objects into the runtime image; no compiler, no
 Resolution is **index only**; a directory scan is too slow.
 
 ```
-PTDATA_PLUGIN_LIB          /usr/local/ptdata/lib/libjson_index_plugin.so
 PTDATA_JSON_INDEX_DIR      /ptdata-index
 PTDATA_JSON_INDEX_PATTERN  json_indexes_*
+PTDATA_PTSERVERS           none
 ```
+
+Three variables, not four: `JsonIndexPlugin` is **compiled into** `libptd3d`
+and `index_plugin_from_env()` reaches it first, so no
+`PTDATA_PLUGIN_LIB=…/libjson_index_plugin.so` is needed — that variable names
+the *dynamic* plugin fallback, which this deployment does not use. `SYS_D3`
+stays unset (resolution is index-only), and `PTDATA_VAX_FLOATS` /
+`PTDATA_DEFAULT_SOURCE` are correct at their defaults for real shotfiles.
+
+`PTDATA_PTSERVERS=none` is not optional. `-DPTDATA_WITH_FDPIO=OFF` removes
+remote *file* access but not ptserver, which is a raw socket, so without the
+sentinel an index miss becomes a connection attempt — reported as a network
+error rather than as absent data, from a container that has no route anywhere.
 
 Two additional read-only bind mounts, mirroring the existing tree mount:
 
@@ -325,8 +337,13 @@ Mounting only `.../ptdata` keeps the rest of `/mnt/beegfs/data` out of the
 sandbox. The index needs no such treatment: `PTDATA_JSON_INDEX_DIR` is a value we
 set ourselves.
 
-`site.env` gains the host paths and the environment block, in the same shape as
-`ARCHIVE_ROOT` and `MDSIP_TREE_ENV`.
+There is no `site.env` in this repo (an earlier draft of this spec assumed
+one). The two configuration surfaces are `scripts/mdsip-sandbox.sh`, which is
+env-var driven and is the reference, and `deploy/fdp-mdsip.container`, the
+quadlet that mirrors it. Both gain the mounts and the environment block, and
+they must change together — the quadlet's own header says so, and a control
+present in one and missing from the other is exactly the failure this
+arrangement exists to prevent.
 
 ## The Pelican-path workaround — REVISIT THIS
 
