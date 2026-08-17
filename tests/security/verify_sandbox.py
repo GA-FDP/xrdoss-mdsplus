@@ -281,6 +281,42 @@ if waived:
     print("  The sandbox is running WITHOUT them. See docs/security.md.")
     print()
 
+# --- ptdata --------------------------------------------------------------
+# The no-network argument for ptdata rests on the library being INCAPABLE of
+# remote I/O, not merely on the container having no route. Only the first
+# survives someone adding a network for an unrelated reason, so assert it
+# where the sandbox is actually running rather than only at image build.
+#
+# NEEDED entries, not ldd output: ldd prints resolved paths, and a path can
+# contain almost any substring -- an earlier check in this repo failed a
+# perfectly clean binary because the build directory was named after the
+# package.
+expect_shell_fails(
+    "libptd3d does not link remote I/O",
+    "sh -c 'readelf -d /usr/local/ptdata/lib/libptd3d.so "
+    "| grep NEEDED | grep -qE \'libfdpio|libXrd\''",
+    "libptd3d built with PTDATA_WITH_FDPIO=ON can open a Pelican URL, which "
+    "turns the sandbox's no-network property from a structural guarantee back "
+    "into a policy one.")
+
+expect_shell_works(
+    "the ptdata C ABI is present",
+    "sh -c 'nm -D --defined-only /usr/local/ptdata/lib/libptd3d.so "
+    "| grep -q ptdata_capi_size'",
+    "a libptd3d that loads but exports no C ABI fails exactly like a data "
+    "problem: every PTDATA2 call returns nothing, with nothing pointing at "
+    "the cause.",
+    waivable=True)
+
+expect_shell_works(
+    "the Pelican-path chain resolves from /",
+    "sh -c 'cd / && /usr/local/fdp/tests/check_pelican_path.sh >/dev/null'",
+    "index entries are absolute Pelican URLs that reach open(2) verbatim and "
+    "resolve relative to /; without the chain every ptdata lookup fails as "
+    "'file not found' with nothing pointing at the cause.",
+    waivable=True)
+
+
 if failures:
     print("%d of %d checks FAILED:" % (len(failures), checks))
     for name, detail, why in failures:
