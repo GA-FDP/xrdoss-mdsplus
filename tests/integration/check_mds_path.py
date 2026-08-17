@@ -6,7 +6,15 @@ tree expression -- which reads as a data problem and is a packaging one. This
 turns it back into a packaging problem, at build or start time rather than
 when someone reads a node.
 
-Run inside the sandbox:  python /usr/local/fdp/tests/check_mds_path.py
+Run against a RUNNING sandbox, from a host that has the MDSplus bindings:
+
+    python tests/integration/check_mds_path.py [host:port]
+
+Through a connection rather than inside the image, because the sandbox has
+python3 but not the MDSplus Python bindings -- and adding mdsplus-python to
+get them would enlarge the attack surface of a container whose premise is that
+a client already has code execution inside it. Going through mdsip also tests
+the environment the SERVER actually has, which is the thing that matters.
 
 The probe is `NAME()`, and the distinction is the EXCEPTION TYPE rather than
 whether it raises. Measured 2026-08-16:
@@ -43,19 +51,33 @@ SITE = [
 KERNEL = ["TranslateLogical", "GetManyExecute"]
 
 
-def resolves(name):
+def resolves(conn, name):
+    """True if `name` resolves on the server.
+
+    Matched on the message rather than the exception class: over a connection
+    the server's TDI status arrives as text inside a generic client-side
+    exception, so `type(exc).__name__ == "TdiUNKNOWN_VAR"` -- which works
+    in-process -- never matches here.
+    """
     try:
-        MDSplus.Data.execute(f"{name}()")
+        conn.get(f"{name}()")
         return True
-    except Exception as exc:  # noqa: BLE001 -- the type is the signal
-        return type(exc).__name__ != "TdiUNKNOWN_VAR"
+    except Exception as exc:  # noqa: BLE001 -- the message is the signal
+        return "UNKNOWN_VAR" not in str(exc)
 
 
 def main():
+    target = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1:8000"
+    try:
+        conn = MDSplus.Connection(target)
+    except Exception as exc:  # noqa: BLE001
+        sys.exit(f"cannot connect to {target}: {exc}")
+    print(f"connected to {target}")
+
     missing = []
     for group, names in (("ours", OURS), ("site", SITE), ("kernel", KERNEL)):
         for name in names:
-            ok = resolves(name)
+            ok = resolves(conn, name)
             print(f"  {'ok  ' if ok else 'FAIL'} {group:<7} {name}")
             if not ok:
                 missing.append(name)
@@ -63,7 +85,7 @@ def main():
     # Guard against the probe silently passing everything: a name that cannot
     # exist must come back unresolved. Without this, a change to MDSplus's
     # error types would turn this whole check into a no-op that reports green.
-    if resolves("NO_SUCH_FUNCTION_XYZZY"):
+    if resolves(conn, "NO_SUCH_FUNCTION_XYZZY"):
         sys.exit("PROBE BROKEN: a nonexistent name reported as resolved, so "
                  "this check proves nothing. Fix the probe before trusting it.")
 
