@@ -383,13 +383,24 @@ Mounting only `.../ptdata` keeps the rest of `/mnt/beegfs/data` out of the
 sandbox. The index needs no such treatment: `PTDATA_JSON_INDEX_DIR` is a value we
 set ourselves.
 
-There is no `site.env` in this repo (an earlier draft of this spec assumed
-one). The two configuration surfaces are `scripts/mdsip-sandbox.sh`, which is
-env-var driven and is the reference, and `deploy/fdp-mdsip.container`, the
-quadlet that mirrors it. Both gain the mounts and the environment block, and
-they must change together — the quadlet's own header says so, and a control
-present in one and missing from the other is exactly the failure this
-arrangement exists to prevent.
+**Correction to a correction.** An earlier revision of this section said
+"there is no `site.env` in this repo", which is true and beside the point: the
+`site.env` the original draft meant is in **`d3d-origin-admin`**, the repo that
+deploys this one, and it does carry `ARCHIVE_ROOT` and `MDSIP_TREE_ENV` exactly
+as first written. I removed a correct reference by looking for it in the wrong
+repository.
+
+So there are **three** configuration surfaces, and they must move together:
+
+| Where | What |
+|---|---|
+| `scripts/mdsip-sandbox.sh` | env-var driven, the reference implementation |
+| `deploy/fdp-mdsip.container` | the quadlet in this repo, mirrors the script |
+| `d3d-origin-admin`'s `site.env` + `etc/fdp-mdsip.container.in` | what is actually deployed on the origin |
+
+A control present in one and missing from another is exactly the failure this
+arrangement exists to prevent — and the origin's template is the one that
+matters in production, since that is the unit systemd actually runs.
 
 ## The Pelican-path workaround — REVISIT THIS
 

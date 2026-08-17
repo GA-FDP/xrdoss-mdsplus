@@ -159,6 +159,34 @@ if(INSTALL_TARGETS)
     install(TARGETS ${INSTALL_TARGETS} LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 endif()
 
+# The modern PTDATA2/PTHEAD2/PTHEAD2_ASCII, shipped with the CLIENT package.
+# They are MDSplus-side TDI, so they belong with mdsip-fdp; the relay links no
+# MDSplus at all and has no use for them.
+#
+# Installed to share/fdp/tdi rather than under <prefix>/tdi DELIBERATELY.
+# MDS_PATH entries are searched in order AND recursively, so putting these
+# under a directory a consumer already has on MDS_PATH would make resolution
+# depend on which of two same-named .fun files the recursive walk reaches
+# first. Measured 2026-08-17: with both a fdp/ and a d3d/ptdata2/ copy under
+# one entry, ours won -- but that is unspecified behaviour, not a guarantee,
+# and if it ever flipped the caller would silently get the SITE version, which
+# is the one with the `missing || operators` bug. Install outside, and make the
+# consumer name this directory explicitly and ahead of the site library:
+#
+#     MDS_PATH="$CONDA_PREFIX/share/fdp/tdi;$CONDA_PREFIX/tdi"
+#
+# Explicit and ordered beats lucky.
+if(BUILD_CLIENT)
+    file(GLOB FDP_TDI_FUNS "${CMAKE_CURRENT_SOURCE_DIR}/tdi/fdp/*.fun")
+    if(NOT FDP_TDI_FUNS)
+        message(FATAL_ERROR
+            "tdi/fdp/*.fun not found -- the client package would install no TDI "
+            "functions and PTDATA2 would resolve to the site version.")
+    endif()
+    install(FILES ${FDP_TDI_FUNS}
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/fdp/tdi)
+endif()
+
 if(BUILD_TESTS)
     enable_testing()
     find_path(DOCTEST_INCLUDE_DIR NAMES doctest/doctest.h

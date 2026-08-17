@@ -59,6 +59,16 @@ outputs:
             # convention for the XRootD plugin below, would make it unloadable.
             - test -f $PREFIX/lib/libMdsIpFDP.so
             - test ! -e $PREFIX/lib/libMdsIpFDP-5.so
+            # The modern PTDATA2/PTHEAD2, which replace the site versions on
+            # MDS_PATH. Asserted by name: a glob that matched nothing would
+            # install zero files and the package would still build, leaving
+            # PTDATA2 to resolve to the site copy -- the one that dies with
+            # %TDI-E-SYNTAX. See the install rule in CMakeLists.txt for why
+            # these live outside $PREFIX/tdi.
+            - test -f $PREFIX/share/fdp/tdi/PTDATA2.fun
+            - test -f $PREFIX/share/fdp/tdi/PTHEAD2.fun
+            - test -f $PREFIX/share/fdp/tdi/PTHEAD2_ASCII.fun
+            - test -f $PREFIX/share/fdp/tdi/PTD3D_LIBRARY.fun
             # The light-install claim: MDSplus and curl, no XRootD. Match on
             # NEEDED entries rather than ldd output, whose resolved paths
             # contain the package name and match almost any pattern.
