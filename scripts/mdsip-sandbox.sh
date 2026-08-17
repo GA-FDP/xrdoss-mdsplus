@@ -62,8 +62,15 @@ for _kv in $TREE_ENV; do TREE_ENV_FLAGS+=(-e "$_kv"); done
 
 # podman derives several paths from /run/user/$UID, which does not survive the
 # login session that created it. See docs/deployment-notes.md.
+#
+# The assignment is unconditional, not "${XDG_RUNTIME_DIR:-...}". The variable
+# is typically still SET to /run/user/$UID after the directory is gone, and
+# `:-` substitutes only when a variable is unset or empty -- never when it is
+# set to something broken. So the old form detected the missing directory and
+# then carefully preserved the value pointing at it, and podman failed with
+# "the path in $XDG_RUNTIME_DIR must be writable by the user".
 if [ ! -d "/run/user/$(id -u)" ]; then
-  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/xdg-$(id -u)}"
+  export XDG_RUNTIME_DIR="/tmp/xdg-$(id -u)"
   # libpod/tmp too: podman creates it under a runtime dir it set up itself, but
   # NOT under one handed to it, and then fails with "error creating temporary
   # file" plus a pause.pid path that does not exist. /tmp gets cleaned on this

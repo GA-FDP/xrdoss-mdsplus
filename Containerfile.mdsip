@@ -15,17 +15,80 @@
 # Run it with scripts/mdsip-sandbox.sh, which supplies the isolation flags.
 # Building this image without those flags buys nothing.
 
+# --- ptdata build stage ------------------------------------------------------
+#
+# PTDATA_WITH_FDPIO=OFF is the load-bearing flag. With it, libptd3d links only
+# libstdc++/libm/libdl and is *physically incapable* of opening a remote file,
+# so the sandbox's no-network property holds by construction rather than only
+# by policy. The assertion at the end of this stage is what keeps that true.
+#
+# Built from source rather than installed from the ga-fdp conda package,
+# because the PUBLISHED libptd3d.so links libfdpio2 -- the conda build needs
+# remote access for normal FDP use. Verified against ptdata 2.2.0 on the
+# channel, so this is a requirement rather than a preference. Installing conda
+# into this image to get one .so would also drag a package manager into a
+# sandbox whose threat model assumes the client already has code execution.
+FROM almalinux:9 AS ptdata-build
+
+ARG PTDATA_VERSION=2.2.0
+
+RUN dnf -y install gcc-c++ cmake make tar gzip \
+ && dnf clean all && rm -rf /var/cache/dnf
+
+ADD https://github.com/GA-FDP/ptdata/archive/refs/tags/release-${PTDATA_VERSION}.tar.gz /tmp/ptdata.tar.gz
+RUN mkdir -p /tmp/ptdata \
+ && tar -xzf /tmp/ptdata.tar.gz -C /tmp/ptdata --strip-components=1
+
+# CMAKE_INSTALL_LIBDIR is set explicitly because GNUInstallDirs resolves it to
+# lib64 on the RHEL family. Without this the library installs to
+# /usr/local/ptdata/lib64 while PTD3D_LIBRARY() looks in lib, and BUILD_CALL
+# on a missing library is not a loud error -- every PTDATA2 call would simply
+# stop working with nothing pointing at the cause.
+RUN cmake -S /tmp/ptdata/cpp -B /tmp/ptdata/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local/ptdata \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DPTDATA_WITH_FDPIO=OFF \
+        -DPTDATA_BUILD_PYTHON=OFF \
+        -DPTDATA_BUILD_TESTS=OFF \
+ && cmake --build /tmp/ptdata/build -j"$(nproc)" \
+ && cmake --install /tmp/ptdata/build
+
+# Fail the BUILD rather than the deployment. A typo in a -D option is ignored
+# by CMake with at most a warning, so a misspelled PTDATA_WITH_FDPIO would
+# silently produce a library that can reach the network; this is what catches
+# it. The six C ABI symbols are checked because a library that loads but
+# exports nothing fails exactly like a data problem.
+RUN set -eux; \
+    test -f /usr/local/ptdata/lib/libptd3d.so; \
+    ! readelf -d /usr/local/ptdata/lib/libptd3d.so | grep NEEDED | grep -qE 'libfdpio|libXrd'; \
+    for sym in ptdata_capi_size ptdata_capi_copy ptdata_capi_header_size \
+               ptdata_capi_header_copy ptdata_capi_last_error ptdata_capi_reset; do \
+        nm -D --defined-only /usr/local/ptdata/lib/libptd3d.so | grep -qw "$sym"; \
+    done
+
+# --- the sandbox itself ------------------------------------------------------
 FROM almalinux:9
 
 ARG MDSPLUS_VERSION=7.158-2
 ARG MDSPLUS_REPO=http://www.mdsplus.org/dist/rhel9/stable/RPMS/x86_64
 ARG MDSPLUS_NOARCH=http://www.mdsplus.org/dist/rhel9/stable/RPMS/noarch
 
-# Two packages, and both are needed. `kernel_bin` is binaries only -- it ships
+# Three packages, and all are needed. `kernel_bin` is binaries only -- it ships
 # no `tdi/` directory at all -- while the noarch `kernel` carries the TDI
 # function library, including tdi/remote/GetManyExecute.fun. Installing only
 # kernel_bin yields a server that starts, accepts connections, and fails every
 # batch request with %TDI-E-UNKNOWN_VAR.
+#
+# `mdsplus-d3d` is the DIII-D site TDI library: 118 .fun files including the
+# PTHEAD_* family and the legacy PTDATA() shim, which the tree survey found is
+# the majority caller (1,259 calls against PTDATA2's 1,210). Upstream packages
+# it -- 61 KB, no dependencies beyond rpmlib -- so this needs no clone, no
+# credentials at build time, and nothing for the mdsip service account to
+# reach. Its copy has drifted from DIII-D/css-d3d-mdsplus in 15 of the 118;
+# of the functions trees actually call, only USING_SIGNAL's drift is on the
+# data-retrieval path. DAMPHASE and LOADDATA differ too, but both SPAWN ssh to
+# a GA host and cannot work here under either version.
 #
 # mdsplus-kernel_bin also declares hard dependencies on globus (GSI transport)
 # and freetds (libsybdb, the SQL layer), neither of which is in the base repos.
@@ -35,6 +98,7 @@ RUN dnf -y install epel-release \
  && dnf -y install socat \
       ${MDSPLUS_REPO}/mdsplus-kernel_bin-${MDSPLUS_VERSION}.el9.x86_64.rpm \
       ${MDSPLUS_NOARCH}/mdsplus-kernel-${MDSPLUS_VERSION}.el9.noarch.rpm \
+      ${MDSPLUS_NOARCH}/mdsplus-d3d-${MDSPLUS_VERSION}.el9.noarch.rpm \
  && dnf clean all \
  && rm -rf /var/cache/dnf
 
@@ -56,10 +120,70 @@ RUN useradd --system --no-create-home --shell /sbin/nologin --uid 5000 mdsip
 # legitimately does.
 RUN find / -xdev -perm /6000 -type f -exec chmod ug-s {} + 2>/dev/null || true
 
-# GetManyExecute is a TDI function under tdi/remote, not a builtin; without it
-# on MDS_PATH every batch request fails with %TDI-E-UNKNOWN_VAR.
-ENV MDS_PATH=/usr/local/mdsplus/tdi\;/usr/local/mdsplus/tdi/remote
+# The ptdata engine and our TDI wrappers.
+COPY --from=ptdata-build /usr/local/ptdata/lib/ /usr/local/ptdata/lib/
+RUN echo /usr/local/ptdata/lib > /etc/ld.so.conf.d/ptdata.conf && ldconfig
+COPY tdi/fdp/ /usr/local/fdp/tdi/
+COPY tests/integration/check_mds_path.py tests/integration/check_pelican_path.py \
+     /usr/local/fdp/tests/
+
+# MDS_PATH entries are searched IN ORDER and each one is searched RECURSIVELY.
+# Measured 2026-08-16 against a real MDSplus, because an earlier draft of the
+# design asserted the opposite -- that the list was flat and every subdirectory
+# needed naming:
+#
+#   MDS_PATH=<tdi>              resolves tdi/d3d/damphase.fun          (1 deep)
+#                               resolves tdi/d3d/ptdata/pthead_rfix.fun (2 deep)
+#                               resolves tdi/mdsshr/TranslateLogical.fun
+#   MDS_PATH=<empty dir>        resolves nothing at all -- so MDS_PATH is
+#                               authoritative and there is no compiled-in default
+#
+# So two entries suffice, and the previous /usr/local/mdsplus/tdi/remote entry
+# was redundant rather than load-bearing. Ours goes FIRST, which is what
+# shadows the site PTDATA2/PTHEAD2/PTHEAD2_ASCII -- also measured: with ours
+# first the fixture reads correctly, and with the order reversed the site's
+# ptdata2.fun is picked instead and dies with %TDI-E-SYNTAX (the "missing ||
+# operators" bug, still present in the copy this RPM ships).
+#
+# Shadowing rather than deleting keeps the override explicit and reversible:
+# drop the first entry and production behaviour returns exactly.
+ENV MDS_PATH=/usr/local/fdp/tdi\;/usr/local/mdsplus/tdi
 ENV MDSPLUS_DIR=/usr/local/mdsplus
+
+# ptdata configuration. Three variables, not four: JsonIndexPlugin is compiled
+# into libptd3d and index_plugin_from_env() reaches it before the dynamic
+# fallback that PTDATA_PLUGIN_LIB names, so no plugin .so is needed. SYS_D3
+# stays unset -- resolution is index-only, because a directory scan over the
+# archive is far too slow.
+#
+# PTDATA_PTSERVERS=none is NOT optional. Building with PTDATA_WITH_FDPIO=OFF
+# removes remote FILE access but not ptserver, which is a raw socket; without
+# the sentinel an index miss becomes a connection attempt from a container
+# that has no route anywhere, and reports as a network error rather than as
+# absent data.
+ENV PTD3D_LIBRARY=/usr/local/ptdata/lib/libptd3d.so
+ENV PTDATA_JSON_INDEX_DIR=/ptdata-index
+ENV PTDATA_JSON_INDEX_PATTERN=json_indexes_*
+ENV PTDATA_PTSERVERS=none
+
+# The index records ABSOLUTE Pelican URLs:
+#   "pelican://osg-htc.org:443/fdp-d3d/archives/ptdata/ptdatac/19887x/198873.PCE"
+# LocalIoProvider::resolve() passes its argument through unchanged, so that
+# string reaches open(2) verbatim. It does not begin with '/', so POSIX treats
+# it as RELATIVE and collapses the doubled slash -- with the working directory
+# at /, it resolves as /pelican:/osg-htc.org:443/fdp-d3d/archives/...
+#
+# So the fix is a directory chain, not code. Two things it depends on, both
+# invisible at a glance: the working directory must be / (see `cd /` in
+# fdp-mdsip-connection), and the Pelican host and federation prefix are encoded
+# in a DIRECTORY NAME -- if either changes, every lookup fails as "file not
+# found" with nothing pointing at the cause.
+#
+# REVISIT: the real fix is for the indexer to record archive-relative paths,
+# with each consumer prepending its own root. Deferred because it needs the
+# index regenerated and its consumers updated.
+RUN mkdir -p '/pelican:/osg-htc.org:443' /fdp-archives/archives/ptdata /ptdata-index \
+ && ln -s /fdp-archives '/pelican:/osg-htc.org:443/fdp-d3d'
 
 # Fail the build rather than the deployment if the server or its transport is
 # missing or unresolved.
@@ -117,6 +241,13 @@ COPY --chmod=0755 <<'EOF' /usr/local/bin/fdp-mdsip-connection
 # this. /tmp is the sandbox's only writable mount (tmpfs), so these logs are
 # per-container and deliberately non-persistent.
 #
+# The ptdata index records absolute Pelican URLs, which reach open(2) verbatim
+# and -- lacking a leading slash -- resolve RELATIVE to the working directory.
+# So this is load-bearing, not hygiene: socat's child inherits socat's cwd,
+# which is why the image's WORKDIR is not sufficient. Without it every ptdata
+# lookup fails as "file not found" with nothing pointing at the cause.
+cd /
+
 # No -m: that flag shares one tree context across every connection.
 exec /usr/local/mdsplus/bin/mdsip -p 8000 -h /etc/mdsip.hosts -c 0 \
      >>/tmp/mdsip.access 2>>/tmp/mdsip.errors
@@ -130,6 +261,9 @@ RUN set -eux; \
     `# shared tree state again, silently and only under concurrency.` \
     grep -q 'fork,reuseaddr' /usr/local/bin/fdp-mdsip-server; \
     grep -q 'nofork' /usr/local/bin/fdp-mdsip-server; \
+    `# The Pelican-path chain resolves relative to the working directory, so` \
+    `# losing this line breaks every ptdata lookup and nothing else.` \
+    grep -q '^cd /$' /usr/local/bin/fdp-mdsip-connection; \
     if grep -qE '(^|[[:space:]])-m([[:space:]]|$)' /usr/local/bin/fdp-mdsip-connection; then \
         echo "FATAL: mdsip -m is back. It shares ONE tree context across all" >&2; \
         echo "connections, so concurrent clients silently read each other's" >&2; \
