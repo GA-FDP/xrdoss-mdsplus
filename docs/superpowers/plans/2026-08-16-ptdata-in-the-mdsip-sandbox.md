@@ -772,12 +772,16 @@ No compiler, no headers, no source — only the shared objects.
 ```dockerfile
 COPY tdi/fdp/ /usr/local/fdp/tdi/
 
-# MDS_PATH is searched in order, first match wins, and it is a FLAT list --
-# naming only a parent resolves PTDATA2 while leaving PTHEAD2 unresolved, a
-# partial install that presents as a data problem rather than a packaging one.
-# Ours goes first so the site versions are shadowed rather than deleted:
-# removing one entry restores production behaviour exactly.
-ENV MDS_PATH=/usr/local/fdp/tdi\;/usr/local/mdsplus/tdi/d3d\;/usr/local/mdsplus/tdi/d3d/ptdata\;/usr/local/mdsplus/tdi/d3d/ptdata2\;/usr/local/mdsplus/tdi/d3d/ptdata_historic\;/usr/local/mdsplus/tdi/d3d/global\;/usr/local/mdsplus/tdi/d3d/nimrod\;/usr/local/mdsplus/tdi\;/usr/local/mdsplus/tdi/cacheshr\;/usr/local/mdsplus/tdi/dev_data_support\;/usr/local/mdsplus/tdi/dev_support\;/usr/local/mdsplus/tdi/dispatch\;/usr/local/mdsplus/tdi/dispatch/phases\;/usr/local/mdsplus/tdi/java\;/usr/local/mdsplus/tdi/math\;/usr/local/mdsplus/tdi/math/signal\;/usr/local/mdsplus/tdi/mdsmath\;/usr/local/mdsplus/tdi/mdsmisc\;/usr/local/mdsplus/tdi/mdsshr\;/usr/local/mdsplus/tdi/mdssql\;/usr/local/mdsplus/tdi/remote\;/usr/local/mdsplus/tdi/retrieve\;/usr/local/mdsplus/tdi/segments\;/usr/local/mdsplus/tdi/tcl\;/usr/local/mdsplus/tdi/transp\;/usr/local/mdsplus/tdi/treeshr
+# MDS_PATH entries are searched IN ORDER and each is searched RECURSIVELY.
+# Measured 2026-08-16, correcting an earlier claim in this plan that the list
+# was flat: one <tdi> entry resolves tdi/d3d/damphase.fun (1 deep) and
+# tdi/d3d/ptdata/pthead_rfix.fun (2 deep). Pointed at an empty directory
+# nothing resolves, so MDS_PATH is authoritative with no default underneath.
+#
+# Order is what shadows the site functions, also measured: ours first and the
+# fixture reads correctly; reversed, the site's ptdata2.fun is picked and dies
+# with %TDI-E-SYNTAX -- the "missing || operators" bug still in the RPM's copy.
+ENV MDS_PATH=/usr/local/fdp/tdi\;/usr/local/mdsplus/tdi
 ```
 
 **The kernel subdirectories are not optional, and the image is missing them
@@ -954,10 +958,11 @@ not its helpers" — the flat-list failure mode.
 #!/usr/bin/env python
 """Every TDI function the ptdata path needs must resolve.
 
-MDS_PATH is a flat list, not recursive, so naming a parent directory resolves
-some functions and not others. That partial install presents as a data problem
--- %TDI-E-UNKNOWN_VAR from inside a tree expression -- rather than as the
-packaging problem it is. This turns it back into a packaging problem.
+MDS_PATH entries are searched in order and RECURSIVELY (measured -- an earlier
+draft of the design claimed otherwise), so a short list suffices. What this
+still catches is the case that matters: an entry missing or misspelled
+entirely, which presents as %TDI-E-UNKNOWN_VAR from inside a tree expression --
+a data problem in appearance, a packaging problem in fact.
 
 Run inside the sandbox:  python tests/integration/check_mds_path.py
 """
@@ -977,18 +982,24 @@ REQUIRED = [
 
 missing = []
 for name in REQUIRED:
-    # Resolution without invocation: a function that exists is a routine, and
-    # one that does not raises. Calling them would need arguments and would
-    # fail for data reasons that have nothing to do with MDS_PATH.
+    # `NAME()` is the probe, and the DISTINCTION is the exception type, not
+    # whether it raises. Measured:
+    #   resolved, no required args -> returns
+    #   resolved, needs args       -> %TDI-E-MISS_ARG
+    #   NOT resolved               -> %TDI-E-UNKNOWN_VAR
+    # A bare `NAME` or `KIND(NAME)` is useless here: TDI reads it as a node
+    # reference and raises TreeNOT_OPEN for resolved and unresolved names
+    # alike, so a check built on it passes for everything.
     try:
-        MDSplus.Data.execute(f"KIND({name})")
-    except Exception:  # noqa: BLE001 -- any failure here means unresolved
-        missing.append(name)
+        MDSplus.Data.execute(f"{name}()")
+    except Exception as exc:  # noqa: BLE001
+        if type(exc).__name__ == "TdiUNKNOWN_VAR":
+            missing.append(name)
 
 if missing:
     sys.exit(
         "MDS_PATH does not resolve: " + ", ".join(missing) +
-        "\nMDS_PATH is a FLAT list -- each subdirectory needs its own entry."
+        "\nMDS_PATH is searched in order and recursively; check that "\n        "/usr/local/fdp/tdi and /usr/local/mdsplus/tdi are both on it."
     )
 print(f"ok: all {len(REQUIRED)} functions resolve")
 ```

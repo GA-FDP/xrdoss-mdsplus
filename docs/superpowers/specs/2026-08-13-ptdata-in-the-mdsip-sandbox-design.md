@@ -301,9 +301,25 @@ irrelevant by construction.
 Those five subdirectories are the RPM's own layout, confirmed from its file
 list, not a guess at one.
 
-`MDS_PATH` is a flat list, not recursive — naming only a parent resolves
-`PTDATA2` while leaving `PTHEAD2` unresolved, a partial install that presents as
-a data problem rather than a packaging one. The legacy `PTDATA()`/`PTHEAD*()`
+**Correction, measured 2026-08-16:** an earlier revision of this section
+claimed `MDS_PATH` was a flat list needing every subdirectory named. It is not.
+Entries are searched **in order**, and each is searched **recursively** — a
+single `<tdi>` entry resolves `tdi/d3d/damphase.fun` one level down and
+`tdi/d3d/ptdata/pthead_rfix.fun` two levels down. `MDS_PATH` is also
+authoritative: pointed at an empty directory, nothing resolves at all, so there
+is no compiled-in default underneath it.
+
+So the list above collapses to two entries:
+
+```
+/usr/local/fdp/tdi          <- our modern PTDATA2/PTHEAD2/PTHEAD2_ASCII
+/usr/local/mdsplus/tdi      <- everything else, recursively
+```
+
+Order is what does the shadowing, and that was measured too: ours first and a
+fixture point reads correctly; the order reversed and the site's `ptdata2.fun`
+is picked instead, dying with `%TDI-E-SYNTAX` — the "missing `||` operators"
+bug, still present in the copy the RPM ships. The legacy `PTDATA()`/`PTHEAD*()`
 shims delegate to `PTDATA2`, so they pick up our implementation for free.
 
 Shadowing rather than deleting keeps the override explicit and reversible:
