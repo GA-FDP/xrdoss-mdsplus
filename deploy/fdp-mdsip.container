@@ -42,6 +42,26 @@ Tmpfs=/run/secrets:rw,noexec,nosuid,nodev,size=1m
 # site's real one with no substitution.
 Volume=/mnt/beegfs/data/archives/mdsplus:/mnt/beegfs/data/archives/mdsplus:ro
 
+# PTData shotfiles and the JSON index, read-only.
+#
+# The shotfile path is NOT free to choose. Index entries are absolute Pelican
+# URLs that reach open(2) verbatim and, lacking a leading slash, resolve
+# relative to / through the symlink chain the image builds
+# (/pelican:/osg-htc.org:443/fdp-d3d -> /fdp-archives). So they must land at
+# /fdp-archives/archives/ptdata or every lookup fails as "file not found".
+# Mounting only .../ptdata keeps the rest of the archive out of the sandbox.
+#
+# The index path IS ours: PTDATA_JSON_INDEX_DIR is set in the image.
+#
+# Both are already inside the trust boundary -- any token holder may read
+# everything under /fdp-d3d/archives read-only -- so a client with code
+# execution in here gains nothing it could not fetch through the origin.
+#
+# Resolution is index-only (SYS_D3 is unset; a directory scan is far too slow),
+# so mounting the archive without the index resolves nothing at all.
+Volume=/mnt/beegfs/data/archives/ptdata:/fdp-archives/archives/ptdata:ro
+Volume=/mnt/beegfs/data/archives/index/json:/ptdata-index:ro
+
 DropCapability=ALL
 NoNewPrivileges=true
 

@@ -60,6 +60,41 @@ TREE_ENV="${MDSIP_TREE_ENV:-efit01_path=$TREE_MOUNT default_tree_path=$TREE_MOUN
 TREE_ENV_FLAGS=()
 for _kv in $TREE_ENV; do TREE_ENV_FLAGS+=(-e "$_kv"); done
 
+# PTData shotfiles and the JSON index, both read-only. Empty disables ptdata,
+# which is the right default for the tree-only fixture the tests use: a missing
+# mount should look like "no ptdata configured", not like an archive that
+# failed to appear.
+#
+#   MDSIP_PTDATA_ARCHIVE=/mnt/beegfs/data/archives/ptdata
+#   MDSIP_PTDATA_INDEX=/mnt/beegfs/data/archives/index/json
+PTDATA_ARCHIVE="${MDSIP_PTDATA_ARCHIVE:-}"
+PTDATA_INDEX="${MDSIP_PTDATA_INDEX:-}"
+
+PTDATA_FLAGS=()
+if [ -n "$PTDATA_ARCHIVE" ]; then
+  [ -d "$PTDATA_ARCHIVE" ] || { echo "no ptdata archive at $PTDATA_ARCHIVE"; exit 1; }
+  # Nested under /fdp-archives to match what the INDEX records. Index entries
+  # are absolute Pelican URLs that reach open(2) verbatim and resolve relative
+  # to /, through the symlink chain the image builds:
+  #   /pelican:/osg-htc.org:443/fdp-d3d -> /fdp-archives
+  # so the shotfiles have to land at /fdp-archives/archives/ptdata or every
+  # lookup fails as "file not found". Mounting only .../ptdata rather than
+  # .../archives keeps the rest of the archive out of the sandbox.
+  PTDATA_FLAGS+=(-v "$(readlink -f "$PTDATA_ARCHIVE"):/fdp-archives/archives/ptdata:ro")
+fi
+if [ -n "$PTDATA_INDEX" ]; then
+  [ -d "$PTDATA_INDEX" ] || { echo "no ptdata index at $PTDATA_INDEX"; exit 1; }
+  # No such constraint here: PTDATA_JSON_INDEX_DIR is a value we set ourselves
+  # in the image, so the container path is ours to choose.
+  PTDATA_FLAGS+=(-v "$(readlink -f "$PTDATA_INDEX"):/ptdata-index:ro")
+fi
+if [ -n "$PTDATA_ARCHIVE" ] && [ -z "$PTDATA_INDEX" ]; then
+  # Resolution is index-only -- SYS_D3 is unset and a directory scan over the
+  # archive is far too slow -- so shotfiles without an index resolve nothing.
+  echo "WARNING: ptdata archive mounted but no index (MDSIP_PTDATA_INDEX)." >&2
+  echo "         Resolution is index-only; every lookup will report as absent." >&2
+fi
+
 # podman derives several paths from /run/user/$UID, which does not survive the
 # login session that created it. See docs/deployment-notes.md.
 #
@@ -188,6 +223,12 @@ podman run -d --name "$NAME" \
   --read-only \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
   -v "$TREES:$TREE_MOUNT:ro" \
+  \
+  `# PTData shotfiles and the JSON index, read-only, only when configured.` \
+  `# Both are already inside the trust boundary: any token holder may read` \
+  `# everything under /fdp-d3d/archives, so a client with code execution here` \
+  `# gains nothing it could not fetch through the origin.` \
+  "${PTDATA_FLAGS[@]}" \
   \
   `# On RHEL-family hosts podman mounts the HOST's subscription credentials at` \
   `# /run/secrets by default -- entitlement certs and rhsm config that nobody` \
