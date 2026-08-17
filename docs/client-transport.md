@@ -8,10 +8,44 @@ Existing DIII-D code that speaks only the MDSplus thin client reaches FDP by
 changing **one string**:
 
 ```python
-conn = MDSplus.Connection('fdp://d3d-origin.gat.com:8443/mdsip')  # was 'atlas.gat.com'
+conn = MDSplus.Connection(
+    'fdp://fdp-d3d-origin.nationalresearchplatform.org:8443/mdsip')  # was 'atlas.gat.com'
 conn.openTree('efit01', 190000)
 conn.get(r'\ipmhd')
 ```
+
+**Use that hostname, not `d3d-origin.gat.com`.** The origin's Let's Encrypt
+certificate carries exactly one SAN:
+
+```
+subject = CN = fdp-d3d-origin.nationalresearchplatform.org
+X509v3 Subject Alternative Name: DNS:fdp-d3d-origin.nationalresearchplatform.org
+```
+
+so connecting by the GA-internal name fails hostname verification. This
+document previously used `d3d-origin.gat.com` in that example, which cannot
+work from anywhere.
+
+The transport says so plainly:
+
+```
+fdp transport: POST https://.../mdsip/connect:
+    SSL peer certificate or SSH remote key was not OK
+```
+
+but MDSplus's Python wrapper discards it and raises a bare
+`Error connecting to fdp://...`, which reads like a network or token problem.
+If a connect fails, run the `curl` check below **without** `-k` — with it, the
+verification that is failing is exactly the one you switched off:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X PUT --data-binary '' \
+  https://fdp-d3d-origin.nationalresearchplatform.org:8443/mdsip/connect
+# 401 = reachable and enforcing auth (good). 000 = TLS failure.
+```
+
+Verified from omega06 on 2026-08-17: trees, `PTDATA2`, `PTNPTS`, and a stored
+record (`\TECE01` in `ece`, whose record calls `PTDATA2`) all return data.
 
 Nothing else about the client changes. MDSplus loads the library itself:
 `parse_host()` splits `<scheme>://<host>`, and `LoadIo()` uppercases the scheme,

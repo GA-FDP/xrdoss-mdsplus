@@ -169,7 +169,7 @@ only to namespaces with the `Writes` capability). Point clients at the origin
 directly instead —
 
 ```
-MDSplus.Connection('fdp://d3d-origin.gat.com:8443/mdsip')
+MDSplus.Connection('fdp://fdp-d3d-origin.nationalresearchplatform.org:8443/mdsip')
 ```
 
 — which needs no namespace at all, because the ext handler claims the path
