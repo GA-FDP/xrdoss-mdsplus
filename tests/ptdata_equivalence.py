@@ -145,6 +145,55 @@ def main():
                 tmsg = f"  (time base {pt.shape} vs {st.shape})"
             print(f"  ok   {label}: {pd.size} samples agree{tmsg}")
 
+    # The header path, which 548 of the 596 measured PTHEAD2 calls reach
+    # through PTHEAD_RFIX and PTHEAD_REAL32. Those return PUBLIC globals rather
+    # than the function's value, so they are a separate contract from the data
+    # path above and can be wrong independently of it.
+    print("\nheader path (PTHEAD_RFIX -> __rarray, PTHEAD_REAL32 -> __real32[2:*])")
+    for point in args.points:
+        try:
+            hdr = ptdata.PtDataHeader(point, args.shot)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  --   {point}: engine has no header ({type(exc).__name__})")
+            skipped += 1
+            continue
+        for fn, mine in (("PTHEAD_RFIX", np.asarray(hdr.rarray, dtype=float)),
+                         ("PTHEAD_REAL32", np.asarray(hdr.real32, dtype=float)[2:])):
+            try:
+                theirs = np.asarray(conn.get(f'{fn}("{point}", {args.shot})').data(),
+                                    dtype=float)
+            except Exception as exc:  # noqa: BLE001
+                # PTHEAD_REAL32 ABORTs when SIZE(__real32) <= 2, i.e. when the
+                # section is empty -- two control words and nothing else. That
+                # is legacy behaviour we deliberately preserve, so "production
+                # aborted" is a comparable outcome, not an untestable one: we
+                # agree exactly when our section is empty too.
+                if fn == "PTHEAD_REAL32":
+                    compared += 1
+                    if mine.size == 0:
+                        print(f"  ok   {point} {fn}: both abort on an empty "
+                              f"section")
+                    else:
+                        failures.append(
+                            f"{point} {fn}: production aborts (empty section) "
+                            f"but we have {mine.size} values")
+                        print(f"  FAIL {point} {fn}: production aborts, "
+                              f"we have {mine.size} values")
+                    continue
+                print(f"  --   {point} {fn}: production raised "
+                      f"({type(exc).__name__}); skipped")
+                skipped += 1
+                continue
+            compared += 1
+            if theirs.shape != mine.shape:
+                failures.append(f"{point} {fn}: {theirs.shape} vs {mine.shape}")
+                print(f"  FAIL {point} {fn}: {theirs.shape} vs {mine.shape}")
+            elif not np.allclose(theirs, mine, rtol=1e-5, atol=0, equal_nan=True):
+                failures.append(f"{point} {fn}: values differ")
+                print(f"  FAIL {point} {fn}: values differ")
+            else:
+                print(f"  ok   {point} {fn}: {mine.size} values agree")
+
     print(f"\ncompared {compared}, skipped {skipped}, "
           f"expected-divergence {diverged}, failed {len(failures)}")
     for f in failures:

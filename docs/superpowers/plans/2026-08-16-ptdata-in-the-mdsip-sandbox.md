@@ -262,7 +262,7 @@ Interpretation, decided now so the result is not rationalized later:
   `PTHEAD_REAL32` read them, 548 calls' worth, which the earlier survey already
   measured.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add tests/survey_tdi_calls.py
@@ -330,49 +330,27 @@ whose second clause is never reached:
 - raises → replace the whole guard with the literal path and drop
   `TranslateLogical`, since an override that throws is not an override.
 
-- [ ] **Step 3: Write the reachability check**
+- [x] **Steps 3-4: Reachability check — SUPERSEDED, not skipped**
 
-```python
-#!/usr/bin/env python
-"""Prove TDI can reach libptd3d, before anything depends on it.
+This was to be a standalone `check_ptd3d_call.py` proving `BUILD_CALL` can
+reach `libptd3d` at all, on the reasoning that a library that fails to load is
+not a loud error. Its uncertainty about which `rtype` materializes a returned
+`const char *` never had to be resolved, because stronger evidence arrived
+first:
 
-Run inside the sandbox image, or anywhere MDS_PATH names tdi/fdp:
+- `PTD3D_LIBRARY()` was tested in all three states — default path, `$PTD3D_LIBRARY`
+  override, and a missing `tdi/mdsshr` degrading to the default.
+- All three wrappers call into the library successfully, in-process
+  (`check_tdi_wrappers.py`, 19 assertions) and through mdsip in the container
+  (`test_ptdata_tdi.sh`, including a stored record).
+- The image build asserts the six `ptdata_capi_*` symbols are exported, and
+  `verify_sandbox.py` re-checks the library in the running sandbox.
 
-    python tests/integration/check_ptd3d_call.py
+A probe that only shows the library loads proves strictly less than a wrapper
+that loads it and returns correct numbers. Writing it now would add a test
+whose failure could not happen without those louder ones failing first.
 
-Calls ptdata_capi_last_error(), which needs no data, no index and no shot --
-it is the one entry point that cannot fail for environmental reasons, so a
-failure here is the library not loading rather than the data not being there.
-"""
-import sys
-
-import MDSplus
-
-expr = (
-    '_e = BUILD_CALL(2, PTD3D_LIBRARY(), "ptdata_capi_last_error"); _e'
-)
-try:
-    result = MDSplus.Data.execute(expr).data()
-except Exception as exc:  # noqa: BLE001 -- report every failure shape
-    sys.exit(f"FAIL: BUILD_CALL into libptd3d raised {type(exc).__name__}: {exc}")
-
-print(f"ok: last_error = {result!r}")
-```
-
-`2` is `DTYPE_B`… **verify the right rtype for a `const char *` return before
-relying on this.** If TDI has no dtype that materializes a returned pointer as
-a string, replace the check with `ptdata_capi_reset` under `BUILD_CALL(0, ...)`
-— it returns void, takes no arguments, and still proves the symbol resolved.
-The point of the check is loading, not the string.
-
-- [ ] **Step 4: Run it**
-
-Run: `pixi run -e mds-validate python tests/integration/check_ptd3d_call.py`
-with `MDS_PATH` including `tdi/fdp` and `PTD3D_LIBRARY` pointing at a locally
-built `libptd3d.so`.
-Expected: `ok:` line, not a `%TDI-E-` error.
-
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tdi/fdp/PTD3D_LIBRARY.fun tests/integration/check_ptd3d_call.py
@@ -502,7 +480,7 @@ MDSplus.Data.execute('_e=0; _i = PTHEAD2(\"IP\", 198873, _e); [_e, _i[31], SIZE(
 ```
 Expected: `[0, <npts>, 20]`, and `PTNPTS(\"IP\", 198873)` equal to `_i[31]`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add tdi/fdp/PTHEAD2.fun
@@ -625,7 +603,7 @@ Expected: `absent : [0]` and a raised exception for `ical=3`. Both matter: the
 first is bug-compatibility callers rely on, the second is the divergence from
 production this design chose deliberately.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add tdi/fdp/PTDATA2.fun
@@ -699,7 +677,7 @@ print(repr(MDSplus.Data.execute('PTHEAD2_ASCII(\"<pcs point>\", 198873)').data()
 ```
 Expected: a clean pointname string with no trailing NULs or `\x32`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add tdi/fdp/PTHEAD2_ASCII.fun
@@ -951,7 +929,7 @@ Expected: index snapshot directories, and shotfile directories through the
 symlink chain. The second command is the real check — it proves the chain
 resolves, not just that the mount exists.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add scripts/mdsip-sandbox.sh deploy/fdp-mdsip.container
@@ -1029,7 +1007,7 @@ if it evaluates rather than resolves, use `TranslateLogical`-style lookup or
 simply `f'{name}'` in a context that forces resolution. The check is worthless
 if it passes for an unresolved name.
 
-- [ ] **Step 2: An e2e test through a real connection**
+- [x] **Step 2: An e2e test through a real connection**
 
 ```bash
 #!/usr/bin/env bash
@@ -1151,7 +1129,7 @@ If TDI has no `getcwd`, assert it the way the engine will feel it instead: read
 a point whose shotfile is only reachable through the chain, which Step 2
 already does — and note here that the direct assertion was not available.
 
-- [ ] **Step 5: Extend the sandbox verification with the no-remote-I/O assertions**
+- [x] **Step 5: Extend the sandbox verification with the no-remote-I/O assertions**
 
 In `tests/security/verify_sandbox.py`, add a check that the shipped libptd3d
 cannot do remote I/O — the property the whole no-network argument rests on:
@@ -1175,7 +1153,7 @@ def check_ptdata_cannot_reach_the_network(exec_in_container):
     assert not bad, f"libptd3d links remote I/O: {bad}"
 ```
 
-- [ ] **Step 6: Run them all**
+- [x] **Step 6: Run them all**
 
 ```bash
 bash scripts/mdsip-sandbox.sh start
@@ -1189,7 +1167,7 @@ image — add a `COPY tests/integration/check_*.py /usr/local/fdp/tests/` to
 Task 6, or bind-mount them; pick one and make the Containerfile match rather
 than leaving the commands above aspirational.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add tests/integration/check_mds_path.py tests/integration/check_pelican_path.py \
@@ -1294,7 +1272,7 @@ investigate before adjusting a tolerance, and record what it was either way.
 The likeliest real cause is a per-DFI calibration the legacy TDI applied that
 the C++ reader does not, which is precisely what this test exists to surface.
 
-- [ ] **Step 3: Also compare the header path**
+- [x] **Step 3: Also compare the header path**
 
 The same comparison for `PTHEAD_RFIX` and `PTHEAD_REAL32`, since those are 548
 calls that never look at `PTDATA2`:
@@ -1308,7 +1286,7 @@ for point in args.points:
             failures.append(f"{point} {fn}: header arrays differ")
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add tests/ptdata_equivalence.py
@@ -1367,7 +1345,7 @@ Expected: `equal: True`.
   supports it. Do **not** patch the RPM's copy in place: that makes the image
   contents differ from the package it claims to install.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git commit -am "test(sandbox): verify the USING_SIGNAL drift is immaterial"
@@ -1401,7 +1379,7 @@ allowlist does not carry. Adding a mount does not obviously add syscalls, but
 Change its status line from "design, revised 2026-08-13 … Not yet implemented"
 to implemented, with the date and a pointer to this plan.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/ README.md
