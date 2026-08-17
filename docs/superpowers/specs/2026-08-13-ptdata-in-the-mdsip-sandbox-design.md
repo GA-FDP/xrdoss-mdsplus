@@ -529,12 +529,51 @@ still be re-run, which is owed for the socat entrypoint regardless.
   `libXrd*` in `NEEDED`, and that the existing no-network checks still pass with
   ptdata present.
 
+## Known engine bug: multi-domain time bases
+
+Found 2026-08-17 by `tests/ptdata_equivalence.py`, after the equivalence run
+was extended to the older campaign where the measured `ical=2` calls actually
+live.
+
+For a point whose record carries **several timing domains**, the engine repeats
+the timestamp at each domain boundary instead of advancing. The `times` array
+comes back non-monotonic (steps of `0`, and one of `-14 ms`), wrong by up to
+20 ms after the first transition, and the right length — so nothing downstream
+notices. `data` is correct.
+
+| Point | DFI | Bad steps | Max time error |
+|---|---|---|---|
+| `ZEFF01` @140054 | 2121 | 4 | 20 ms |
+| `ZEFF08` @140054 | 2121 | 4 | 20 ms |
+| `IP`, `BT` @198873 | 2121 | 0 | 0 |
+
+Not DFI-wide: the same DFI is correct on a single-domain record, which is why
+198873 agreed and why the engine's own suite missed it. It needs a genuinely
+multi-domain record, and those are in the older campaigns — the archived data
+this origin exists to serve.
+
+**This reaches our `PTDATA2`.** The legacy TDI fetched the 64-bit time array
+itself via `ptdata64_` call type 22; the modern wrapper trusts
+`ExtractedData.times`. So any tree node calling `PTDATA2` on a multi-domain
+point gets a wrong time axis, silently. Data values are unaffected, so a
+consumer ignoring time is fine — one that interpolates or plots is not, and a
+non-monotonic axis breaks `np.interp` without erroring.
+
+Belongs in `ptdata` (suspected `cpp/src/dfi/domain_timing_dfi.cpp`), not here.
+Write-up ready to file as a GitHub issue; it is **not** a reason to hold this
+work, since the sandbox is strictly better than the current state where these
+nodes do not resolve at all.
+
 ## Follow-ups
 
 1. `CalibrationMode::Volts` (`ical=2`) in the `ptdata` repo — a prerequisite,
    not a follow-up, but tracked there.
 2. Make the indexer record archive-relative paths and retire the trick above.
 3. Re-run `tests/security/capture_syscalls.sh` against the socat entrypoint.
-4. `rfdev_160062.tree` was reported "Corrupted/truncated" during the survey.
+4. File the multi-domain timing bug above against `ptdata`, and re-run
+   `tests/ptdata_equivalence.py --shot 140054 --points ZEFF01 ZEFF02 ZEFF08 ZEFF16`
+   once it is fixed. That command currently reports 12 time-base failures and
+   0 data failures.
+5. `rfdev_160062.tree` was reported "Corrupted/truncated" during the survey.
    Unverified whether that is a bad file on the origin or a download artefact;
    there is precedent for corrupt archive files. Worth a separate look.
