@@ -1,7 +1,16 @@
 # PTData in the mdsip sandbox
 
-**Status:** design, revised 2026-08-13 after measuring real `ical` usage. Not
-yet implemented.
+**Status:** **implemented** 2026-08-16, on branch `design/ptdata-in-sandbox`.
+Plan: `docs/superpowers/plans/2026-08-16-ptdata-in-the-mdsip-sandbox.md`.
+Revised 2026-08-13 after measuring real `ical` usage, and again on 2026-08-16
+where implementation disproved parts of it -- `MDS_PATH` is recursive, the site
+library ships as an upstream RPM, and several claims below carry corrections
+marked as such.
+
+Verified end to end: a **stored record** calling `PTDATA2` -- the failure this
+spec exists to fix -- returns data through the sandbox, and the modern engine
+agrees with production's legacy `PTDATA2` on 19 of 19 comparable cases across
+three DFIs and `ical` {1, 2, 4}.
 
 **This spans two repos and wants two implementation plans, in order:**
 
@@ -276,9 +285,14 @@ drift there is moot.
 `USING_SIGNAL` is the one that matters, and the difference is substantive
 rather than cosmetic: the site copy opens the tree explicitly through
 `TreeShr->TreeOpen` and returns `[0]` on failure, while the RPM's uses
-`using(..., _shot, _tree)` and lets TDI resolve it. **Verify this one against a
-real tree during implementation** — it is the only drifted function on the
-data-retrieval path.
+`using(..., _shot, _tree)` and lets TDI resolve it.
+
+**Checked 2026-08-16, and it is immaterial.** Both versions were run against a
+real call site taken from a real tree — `USING_SIGNAL("\\EFIT01::R0", "EFIT01",
+198873)`, as `\MHD::TOP.ALF:FCI1` invokes it — and returned identical results:
+304 samples, same first value, same sum. The RPM's copy is fine to use as
+shipped. (`transport` alone carries 2,357 `USING_SIGNAL` calls, so this was
+worth the check.)
 
 The five `ptdata2/` files that differ are ones we replace, so their drift is
 irrelevant by construction.
@@ -472,6 +486,22 @@ user calling `PTDATA2` interactively with `ical=3`, `10–19` or `20` gets an
 error where production would answer. No tree measured uses those, and the
 sandbox supports none of them today, so this is a strict improvement — but it is
 a divergence and belongs on the record.
+
+**`ical=2` on a PCS DFI also diverges**, found by the equivalence run rather
+than predicted. `ptdata` refuses `CalibrationMode::Volts` for DFIs 2201/2202/
+2203 — their legacy calibration branch was never validated against real data,
+so it raises rather than returning numbers it cannot vouch for — while
+production answers. Measured before accepting it: **all 64 `ical=2` call sites**
+across `spectroscopy` and `d3d` at shots 160062 and 140054 are `ZEFF01`–`ZEFF16`,
+which are **DFI 2121**, a digitizer. No tree-embedded call reaches a PCS DFI
+with `ical=2`, so this cannot affect a stored record. `tests/ptdata_equivalence.py`
+encodes it as an explicit expected divergence rather than tolerating it
+silently, so a tree that ever does ask for it shows up as a failure.
+
+**Equivalence, measured 2026-08-16** against `atlas.gat.com`, shot 198873:
+19 of 19 comparable cases agree to `rtol=1e-5` — `IP`, `BT`, `VLOOP`, `BCOIL`,
+`GASA` (DFI 2121, up to 2,097,152 samples each), `PCBCOIL` (2201) and `IPSIP`
+(2203), across `ical` {1, 2, 4}, plus the two accepted divergences above.
 
 ## Security
 

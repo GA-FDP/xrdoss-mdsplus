@@ -549,6 +549,37 @@ production topology, and the relay is indifferent to which:
 MDSIP_SANDBOX=1 pixi run relay-e2e
 ```
 
+## PTData: two more read-only mounts, and a library that cannot reach the network
+
+The sandbox serves PTData as well as trees, which adds two read-only bind
+mounts and one shared library. It does not move the boundary.
+
+| Host | Container | Contents |
+|---|---|---|
+| `/mnt/beegfs/data/archives/ptdata` | `/fdp-archives/archives/ptdata` | shotfiles |
+| `/mnt/beegfs/data/archives/index/json` | `/ptdata-index` | index snapshots |
+
+**The data added is already inside the boundary.** Any token holder may read
+everything under `/fdp-d3d/archives` read-only, so a client with code execution
+in the sandbox gains nothing it could not already fetch through the origin.
+Both mounts are `:ro`, and the shotfile path is nested to match the absolute
+Pelican URLs the index records rather than mounting the archive root.
+
+**The ptdata library cannot open a remote file at all.** `libptd3d` is built
+with `-DPTDATA_WITH_FDPIO=OFF`, so it links only libstdc++/libm/libdl — no
+libfdpio2, no XRootD. That is asserted at image build time with `readelf` and
+re-checked by `tests/security/verify_sandbox.py`, because it is the difference
+between "the sandbox has no route" and "the library cannot use one", and only
+the second survives someone adding a network for an unrelated reason.
+`PTDATA_PTSERVERS=none` closes the other half: `WITH_FDPIO=OFF` removes remote
+*file* access but not ptserver, which is a raw socket.
+
+**No new syscalls are expected, and that is not the same as measured.** The
+added paths are ordinary file I/O on already-mounted filesystems.
+`tests/security/capture_syscalls.sh` has not been re-run since the socat
+entrypoint landed, which is owed regardless of ptdata; "obviously no new
+syscalls" is exactly the claim the capture exists to replace.
+
 ## What is still open
 
 
