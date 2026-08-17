@@ -574,11 +574,39 @@ the second survives someone adding a network for an unrelated reason.
 `PTDATA_PTSERVERS=none` closes the other half: `WITH_FDPIO=OFF` removes remote
 *file* access but not ptserver, which is a raw socket.
 
-**No new syscalls are expected, and that is not the same as measured.** The
-added paths are ordinary file I/O on already-mounted filesystems.
-`tests/security/capture_syscalls.sh` has not been re-run since the socat
-entrypoint landed, which is owed regardless of ptdata; "obviously no new
-syscalls" is exactly the claim the capture exists to replace.
+**No new syscalls — measured 2026-08-17, not assumed.**
+`tests/security/capture_syscalls.sh` was rewritten to trace the shipped image
+running its real entrypoint (socat, which *execs* a fresh mdsip per connection)
+with ptdata in the workload, rather than a bare `mdsip -m` on the host with no
+ptdata. The workload drives trees, a 4 MB `\psirz`, getMany, error paths,
+concurrent connections, and the full ptdata surface.
+
+**56 distinct syscalls observed. Exactly one is not in the profile: `statfs`.**
+It is not added, and the reason is the point of retaking the capture rather
+than regenerating from it blindly:
+
+```
+statfs("/sys/fs/selinux", ...) = -1 ENOENT
+statfs("/selinux", ...)        = -1 ENOENT
+```
+
+That is libselinux, which `mdsip` links, probing for the SELinux mountpoint —
+18 calls, every one already failing `ENOENT`. Under the allowlist it gets
+`EPERM` instead, which libselinux reads the same way: no SELinux. Confirmed by
+running the whole workload under the unmodified profile — trees, the 4 MB
+read, getMany, `PTDATA2`, `PTNPTS`, `PTHEAD_RFIX` — all correct.
+
+The other direction is worth a look but not a delete list: **109 syscalls are
+allowed and were not observed.** An error path may need any of them, and this
+workload cannot reach every error path, so narrowing the profile on this
+evidence alone would trade a measured risk for an unmeasured one.
+
+Two things the retake corrected in the script itself. It required `accept4`,
+which `mdsip -m` used and socat does not — socat calls `accept(2)`, so a
+perfectly good capture of the current architecture failed its own guard. And
+strace now goes into a throwaway *derived* image: shipping a tracer in a
+sandbox whose threat model assumes the client has code execution would hand
+that client a debugger.
 
 ## What is still open
 

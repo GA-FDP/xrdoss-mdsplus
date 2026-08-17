@@ -569,7 +569,12 @@ nodes do not resolve at all.
 1. `CalibrationMode::Volts` (`ical=2`) in the `ptdata` repo — a prerequisite,
    not a follow-up, but tracked there.
 2. Make the indexer record archive-relative paths and retire the trick above.
-3. Re-run `tests/security/capture_syscalls.sh` against the socat entrypoint.
+3. ~~Re-run `tests/security/capture_syscalls.sh` against the socat entrypoint.~~
+   **Done 2026-08-17.** The script now traces the shipped image's real
+   entrypoint with ptdata in the workload; 56 syscalls observed, and the only
+   one outside the profile is libselinux's `statfs` probe, which already fails
+   `ENOENT`. The profile needs no change — verified by running the full
+   workload under it. See `docs/security.md`.
 4. File the multi-domain timing bug above against `ptdata`, and re-run
    `tests/ptdata_equivalence.py --shot 140054 --points ZEFF01 ZEFF02 ZEFF08 ZEFF16`
    once it is fixed. That command currently reports 12 time-base failures and
