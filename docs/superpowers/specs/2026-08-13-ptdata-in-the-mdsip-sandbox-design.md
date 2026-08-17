@@ -182,8 +182,24 @@ Only three reach native code, so only three are ours to write:
 | Ours | Comes free (pure TDI on top) |
 |---|---|
 | `PTDATA2` | `PTDATA`, `PTNPTS`, `ECEPROF`, `IP_PROBES`, `IP_PROBES_Z` |
-| `PTHEAD2` | `PTHEAD_IFIX`, `PTHEAD_RFIX`, `PTHEAD_REAL32` |
+| `PTHEAD2` | `PTHEAD_IFIX`, `PTHEAD_RFIX`, `PTHEAD_REAL32`, `PTHEAD_INT16`, `PTHEAD_INT32` |
 | `PTHEAD2_ASCII` | `PTHEAD_ASCII` |
+
+The `PTHEAD_*` family is **six**. `PTHEAD_INT16` and `PTHEAD_INT32` do not
+appear in the call survey — nothing in the sampled records calls them — but
+they exist in the site library, each one line returning `__int16[2:*]` /
+`__int32[2:*]`, and they work for free because `PTHEAD2` sets all seven
+globals. Measured 2026-08-16 by grepping the 118 site `.fun` files for reads of
+each global, which is a cheaper and differently-shaped question than counting
+calls: it finds consumers the record scan cannot, because a read of a global is
+not a call.
+
+That grep also found that **`__branch`, `__crate` and `__slot` have no site
+consumer at all** — only a stored record could read them — and that
+`ptdata_historic.fun` defines a *second* `PTDATA` (memoized, calling a
+different native library, reachable as `PTDATA_HISTORIC` since MDSplus resolves
+by filename). Its cache keys are its own, so our `PTDATA2` cannot cross-talk
+with it as long as it does not set `__ptdata_pointname`/`__ptdata_shot`.
 
 `PTNPTS` is `return(_ifix[31])`; the four `PTHEAD_*` shims are one line each.
 The remaining site functions — `DAMPHASE`, `USING_SIGNAL`, `LOADDATA`,

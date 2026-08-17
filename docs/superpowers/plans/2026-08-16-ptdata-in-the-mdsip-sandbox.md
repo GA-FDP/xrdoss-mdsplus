@@ -17,11 +17,15 @@ almalinux 9, socat.
 
 **Spec:** `docs/superpowers/specs/2026-08-13-ptdata-in-the-mdsip-sandbox-design.md`
 
-**Prerequisite:** `ptdata` 2.2.0 must be released. Plan 1
-(`ptdata/docs/superpowers/plans/2026-08-16-tdi-c-entry-points.md`) is complete
-through Task 10; only its Task 9 step 4 (release + `fdp-core` bless) remains.
-Nothing below can be verified until that tag exists, because the equivalence
-tests need `CalibrationMode::Volts` and every wrapper calls `capi.h`.
+**Prerequisite: satisfied.** `ptdata 2.2.0` was released to `ga-fdp` on
+2026-08-16 and carries `capi.h`, `libptd3d.so` and all six `ptdata_capi_*`
+symbols. Plan 1
+(`ptdata/docs/superpowers/plans/2026-08-16-tdi-c-entry-points.md`) is complete.
+
+One thing that release settled for Task 6: the **published** `libptd3d.so`
+links `libfdpio2`, because the conda build needs remote access for normal FDP
+use. The sandbox therefore cannot reuse the conda package — the source build
+with `-DPTDATA_WITH_FDPIO=OFF` is a requirement, not a preference.
 
 ---
 
@@ -52,8 +56,15 @@ PTHEAD_IFIX   _ifix = pthead2(...); return(_ifix)
 PTHEAD_RFIX   _ifix = pthead2(...); return(__rarray)
 PTHEAD_REAL32 _ifix = pthead2(...); IF (_error) ABORT();
               IF (LE(SIZE(__real32),2)) ABORT(); return(__real32[2:*])
+PTHEAD_INT16  _ifix = pthead2(...); return(__int16[2:*])
+PTHEAD_INT32  _ifix = pthead2(...); return(__int32[2:*])
 PTHEAD_ASCII  return(pthead2_ascii(...))
 ```
+
+Six shims, not the four the first survey pass reported — `PTHEAD_INT16` and
+`PTHEAD_INT32` were missed because the record scan counts *calls*, and those
+two are not called from stored records in the sampled trees. They are still on
+`MDS_PATH` and still work, for free, because `PTHEAD2` sets all seven globals.
 
 Two consequences. `PTNPTS` reads `_ifix[31]`, 0-based — legacy `IARRAY(32)`,
 which `legacy_header::build` fills from `fh.data_word_count`; the ABI's own
@@ -164,11 +175,62 @@ def scan_globals(text):
 Wire it into the per-record loop alongside the call classification and
 aggregate into a `Counter` keyed `(global, tree)`, printed as its own table.
 
-- [ ] **Step 2: Run it over the same 36 trees**
+- [x] **Step 1b: Measure the site library first — DONE 2026-08-16, and it
+      answers most of the question for free**
 
-Run: `pixi run python tests/survey_tdi_calls.py --globals`
-Expected: a table. Record the totals in this plan under Task 4 before writing
-`PTDATA2.fun`.
+Before rebuilding a tree corpus, grep the 118 site `.fun` files, which are on
+disk already. Every global has *some* consumer, and knowing which is a strict
+subset of the record scan but costs nothing:
+
+| Global | Read by (outside `ptdata2/`, which we replace) |
+|---|---|
+| `__iarray` | — (returned directly by `PTHEAD2`) |
+| `__rarray` | `ptdata/pthead_rfix.fun` |
+| `__real32` | `ptdata/pthead_real32.fun` |
+| `__int16` | `ptdata/pthead_int16.fun` |
+| `__int32` | `ptdata/pthead_int32.fun` |
+| `__ascii` | — (via `PTHEAD2_ASCII`) |
+| `__real64` | only `ptdata2/pcdata.fun`, `ptdata2/check_pcdata.fun` — both ours to replace |
+| `__ptdata_signal` | `ptdata_historic/ptdata_historic.fun` |
+| `__branch` `__crate` `__slot` | **nothing** |
+
+Three things this changes:
+
+1. **The `PTHEAD_*` family is six, not four.** `PTHEAD_INT16` and
+   `PTHEAD_INT32` exist and both `return(__<sec>[2:*])`, exactly like
+   `PTHEAD_REAL32`. They come free from `PTHEAD2` setting all seven globals —
+   which Task 3 does — but the earlier table under-counted the surface.
+2. **`__branch`/`__crate`/`__slot` have no site consumer at all.** Only a
+   stored record could read them, which is what Step 2 would measure. Until
+   then, take the conservative branch already specified below: set them, skip
+   the DFI-list guard.
+3. **`ptdata_historic.fun` defines a second, different `PTDATA`** — memoized on
+   `PUBLIC __ptdata_pointname`/`__ptdata_shot` and calling a *different* native
+   library (`libMdsD3D->mdsptnpts_`). It is reachable as `PTDATA_HISTORIC`
+   (MDSplus resolves by filename, not by the `FUN PUBLIC` name inside), and its
+   early return reads `__ptdata_signal` only when *its own* cache keys match —
+   keys nothing else writes. So our `PTDATA2` setting `__ptdata_signal` cannot
+   cross-talk with it. **Do not set `__ptdata_pointname`/`__ptdata_shot`**,
+   which would.
+
+- [ ] **Step 2: Run the record scan over a tree corpus — BLOCKED, needs a corpus**
+
+The 36 trees the earlier survey used lived under `/tmp` and have been cleaned;
+this host has no Pelican-capable MDSplus environment to re-read them from the
+origin (`ptdata`'s `mds-validate` env has `mdsplus-xrdcl` but not
+`xrdcl-pelican-fdp`, so `pelican://` URLs will not open).
+
+That the corpus evaporated is itself the finding: **no fetch script was ever
+committed**, so the survey is not reproducible. Write one before re-running —
+`tests/fetch_survey_trees.sh`, taking a tree/shot list and pulling the
+`.tree`/`.characteristics`/`.datafile` triples to a given root — otherwise the
+next session pays this cost again.
+
+Run: `pixi run python tests/survey_tdi_calls.py --globals <treeroot>`
+Expected: a table. Record the totals here.
+
+Nothing below is blocked on this. Step 1b already justifies the conservative
+choice, and the interpretation rule below says what to do with either answer.
 
 Interpretation, decided now so the result is not rationalized later:
 
@@ -199,7 +261,7 @@ missing library is not a loud error.
 - Create: `tdi/fdp/PTD3D_LIBRARY.fun`
 - Create: `tests/integration/check_ptd3d_call.py`
 
-- [ ] **Step 1: Measure what TranslateLogical returns when unset**
+- [x] **Step 1: Measure what TranslateLogical returns when unset**
 
 The legacy `PTDATA_LIBRARY.fun` returns `TranslateLogical("PTDATA_LIBRARY")`
 with no guard. Before copying that shape, find out what an unset logical
@@ -217,7 +279,7 @@ print('len:', MDSplus.Data.execute('LEN(TranslateLogical(\"NO_SUCH_LOGICAL_XYZ\"
 Expected: one of `\$MISSING`, an empty string, or an exception. Write the guard
 in Step 2 against whichever it is — do not guess.
 
-- [ ] **Step 2: Write the function**
+- [x] **Step 2: Write the function**
 
 ```
 /* PTD3D_LIBRARY()
@@ -308,7 +370,7 @@ means `PTDATA2` can just use it.
 **Files:**
 - Create: `tdi/fdp/PTHEAD2.fun`
 
-- [ ] **Step 1: Write it**
+- [x] **Step 1: Write it**
 
 ```
 /* PTHEAD2(IN _pointname, OPTIONAL IN _shot, OPTIONAL OUT _error)
@@ -410,7 +472,7 @@ section and leave `__int16` as an all-zero long array — but only after
 Task 1's survey confirms nothing reads it beyond `PTDATA2`'s
 `__int16[6..8]`, and note the divergence here.
 
-- [ ] **Step 2: Test it against a real shot**
+- [x] **Step 2: Test it against a real shot**
 
 ```bash
 pixi run -e mds-validate python -c "
@@ -434,7 +496,7 @@ git commit -m "feat(tdi): PTHEAD2 over the ptdata C ABI"
 **Files:**
 - Create: `tdi/fdp/PTDATA2.fun`
 
-- [ ] **Step 1: Write it**
+- [x] **Step 1: Write it**
 
 ```
 /* PTDATA2(IN _pointname, OPTIONAL IN _shot, OPTIONAL IN _ical,
@@ -515,7 +577,7 @@ reads globals that only `PTHEAD2` sets, and the `_ntimes == 0` branch calls
 `__branch`, that block can be dropped along with its `PTHEAD2` dependency —
 decide from the survey, and leave a comment saying which way it went.
 
-- [ ] **Step 2: Test against a real shot**
+- [x] **Step 2: Test against a real shot**
 
 ```bash
 pixi run -e mds-validate python -c "
@@ -526,7 +588,7 @@ print(sig.data().shape, sig.dim_of().data()[:3], sig.dim_of().units)
 ```
 Expected: a nonempty array, a millisecond time axis, units `ms`.
 
-- [ ] **Step 3: Test the absent and the invalid cases separately**
+- [x] **Step 3: Test the absent and the invalid cases separately**
 
 ```bash
 pixi run -e mds-validate python -c "
@@ -557,7 +619,7 @@ git commit -m "feat(tdi): PTDATA2 over the ptdata C ABI"
 **Files:**
 - Create: `tdi/fdp/PTHEAD2_ASCII.fun`
 
-- [ ] **Step 1: Write it**
+- [x] **Step 1: Write it**
 
 The legacy version calls `PTHEAD2_SIZE`, allocates, calls `ptdata_`, then
 decodes int32 words back to text 4 bytes at a time, dropping NULs. Our header
@@ -603,7 +665,7 @@ PUBLIC FUN PTHEAD2_ASCII(IN _pointname, OPTIONAL IN _shot, OPTIONAL OUT _error) 
 }
 ```
 
-- [ ] **Step 2: Test against a PCS pointname**
+- [x] **Step 2: Test against a PCS pointname**
 
 The DFIs that use it are 2201/2202/2203, whose ASCII header holds the clock
 pointname. Pick one from the survey output, or fall back to any point with a
@@ -715,7 +777,34 @@ COPY tdi/fdp/ /usr/local/fdp/tdi/
 # partial install that presents as a data problem rather than a packaging one.
 # Ours goes first so the site versions are shadowed rather than deleted:
 # removing one entry restores production behaviour exactly.
-ENV MDS_PATH=/usr/local/fdp/tdi\;/usr/local/mdsplus/tdi/d3d\;/usr/local/mdsplus/tdi/d3d/ptdata\;/usr/local/mdsplus/tdi/d3d/ptdata2\;/usr/local/mdsplus/tdi/d3d/ptdata_historic\;/usr/local/mdsplus/tdi/d3d/global\;/usr/local/mdsplus/tdi/d3d/nimrod\;/usr/local/mdsplus/tdi\;/usr/local/mdsplus/tdi/remote
+ENV MDS_PATH=/usr/local/fdp/tdi\;/usr/local/mdsplus/tdi/d3d\;/usr/local/mdsplus/tdi/d3d/ptdata\;/usr/local/mdsplus/tdi/d3d/ptdata2\;/usr/local/mdsplus/tdi/d3d/ptdata_historic\;/usr/local/mdsplus/tdi/d3d/global\;/usr/local/mdsplus/tdi/d3d/nimrod\;/usr/local/mdsplus/tdi\;/usr/local/mdsplus/tdi/cacheshr\;/usr/local/mdsplus/tdi/dev_data_support\;/usr/local/mdsplus/tdi/dev_support\;/usr/local/mdsplus/tdi/dispatch\;/usr/local/mdsplus/tdi/dispatch/phases\;/usr/local/mdsplus/tdi/java\;/usr/local/mdsplus/tdi/math\;/usr/local/mdsplus/tdi/math/signal\;/usr/local/mdsplus/tdi/mdsmath\;/usr/local/mdsplus/tdi/mdsmisc\;/usr/local/mdsplus/tdi/mdsshr\;/usr/local/mdsplus/tdi/mdssql\;/usr/local/mdsplus/tdi/remote\;/usr/local/mdsplus/tdi/retrieve\;/usr/local/mdsplus/tdi/segments\;/usr/local/mdsplus/tdi/tcl\;/usr/local/mdsplus/tdi/transp\;/usr/local/mdsplus/tdi/treeshr
+```
+
+**The kernel subdirectories are not optional, and the image is missing them
+today.** `MDS_PATH` currently names only `tdi` and `tdi/remote`, but the kernel
+ships `.fun` files in **19** directories (read from the RPM file list), and the
+site library calls into eight of them:
+
+| Kernel subdir | Site call sites |
+|---|---|
+| `treeshr` | 10 |
+| `mdsshr` | 10 |
+| `mdsmath` | 5 |
+| `remote` | 3 |
+| `tcl` | 3 |
+| `dispatch/phases`, `mdssql`, `math` | 1 each |
+
+`mdsshr` is the one that bites immediately: it holds `TranslateLogical.fun`,
+which `PTD3D_LIBRARY()` uses and which the site's own `ptdata2.fun` calls as
+`translatelogical("VENDOR")`. Without it the call raises
+`%TDI-E-UNKNOWN_VAR` — *which reads exactly like an unset logical and is not
+one*. Listing all 19 rather than the eight measured ones costs nothing and
+avoids re-running this analysis whenever a tree calls something new.
+
+This is a pre-existing defect, not one this work introduces: any stored record
+calling a `treeshr/` or `mdsshr/` function fails in today's sandbox.
+
+```dockerfile
 
 ENV PTD3D_LIBRARY=/usr/local/ptdata/lib/libptd3d.so
 ENV PTDATA_JSON_INDEX_DIR=/ptdata-index
