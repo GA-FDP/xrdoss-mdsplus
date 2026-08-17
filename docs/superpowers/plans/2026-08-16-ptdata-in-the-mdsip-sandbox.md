@@ -1209,7 +1209,7 @@ decades is only defensible with a number-for-number comparison.
 **Files:**
 - Create: `tests/ptdata_equivalence.py`
 
-- [ ] **Step 1: Write the comparison**
+- [x] **Step 1: Write the comparison**
 
 ```python
 #!/usr/bin/env python
@@ -1286,7 +1286,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run against a production MDSplus server and the sandbox.
 Expected: agreement. **A disagreement here is a finding, not a test bug** —
@@ -1328,7 +1328,7 @@ only drifted function on the data-retrieval path.
 **Files:**
 - Modify: `tests/integration/test_ptdata_tdi.sh` (or a sibling)
 
-- [ ] **Step 1: Find a record that calls it**
+- [x] **Step 1: Find a record that calls it**
 
 ```bash
 pixi run python tests/survey_tdi_calls.py --grep USING_SIGNAL --print-nodes
@@ -1339,7 +1339,7 @@ so printing the node path alongside a matched call is a few lines. Expected: at
 least one node path in `mhd` or `transport`, where the earlier survey found all
 161 calls.
 
-- [ ] **Step 2: Read that node through the sandbox and through production**
+- [x] **Step 2: Read that node through the sandbox and through production**
 
 ```bash
 python -c "
@@ -1358,7 +1358,7 @@ print('equal:', p.shape == s.shape and np.allclose(p, s, rtol=1e-5, equal_nan=Tr
 ```
 Expected: `equal: True`.
 
-- [ ] **Step 3: Decide, and record the decision**
+- [x] **Step 3: Decide, and record the decision**
 
 - **Equal** → nothing to do; note in the spec that the drift was checked and is
   immaterial.
@@ -1381,7 +1381,7 @@ git commit -am "test(sandbox): verify the USING_SIGNAL drift is immaterial"
 - Modify: `docs/security.md`, `README.md`
 - Modify: `docs/superpowers/specs/2026-08-13-ptdata-in-the-mdsip-sandbox-design.md`
 
-- [ ] **Step 1: Update the security posture note**
+- [x] **Step 1: Update the security posture note**
 
 The spec's argument is that the added data is already inside the boundary — any
 token holder may read everything under `/fdp-d3d/archives` read-only — so a
@@ -1389,14 +1389,14 @@ client with code execution gains nothing new. Write that into `docs/security.md`
 alongside the existing mounts, together with the two properties that back it:
 both mounts are read-only, and `libptd3d` cannot open a remote file at all.
 
-- [ ] **Step 2: Note the syscall-capture debt**
+- [x] **Step 2: Note the syscall-capture debt**
 
 `tests/security/capture_syscalls.sh` has not been re-run since the socat
 entrypoint landed, and ptdata adds file I/O paths that may touch syscalls the
 allowlist does not carry. Adding a mount does not obviously add syscalls, but
 "obviously" is what the capture exists to replace.
 
-- [ ] **Step 3: Mark the spec implemented**
+- [x] **Step 3: Mark the spec implemented**
 
 Change its status line from "design, revised 2026-08-13 … Not yet implemented"
 to implemented, with the date and a pointer to this plan.
