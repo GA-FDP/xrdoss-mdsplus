@@ -35,7 +35,15 @@ ARG PTDATA_VERSION=2.2.0
 RUN dnf -y install gcc-c++ cmake make tar gzip \
  && dnf clean all && rm -rf /var/cache/dnf
 
-ADD https://github.com/GA-FDP/ptdata/archive/refs/tags/release-${PTDATA_VERSION}.tar.gz /tmp/ptdata.tar.gz
+# From the build context, not a URL: GA-FDP/ptdata is an INTERNAL repository,
+# so an anonymous ADD returns 404, and baking a token into the build would put
+# credentials in the image history -- in a sandbox whose premise is that a
+# client already has code execution inside it.
+#
+# Produce it first:  scripts/fetch-ptdata-src.sh 2.2.0
+# That script uses a sibling checkout when there is one and `gh api` otherwise,
+# so the credentials stay with whoever runs the build.
+COPY ptdata-src.tar.gz /tmp/ptdata.tar.gz
 RUN mkdir -p /tmp/ptdata \
  && tar -xzf /tmp/ptdata.tar.gz -C /tmp/ptdata --strip-components=1
 
@@ -124,8 +132,11 @@ RUN find / -xdev -perm /6000 -type f -exec chmod ug-s {} + 2>/dev/null || true
 COPY --from=ptdata-build /usr/local/ptdata/lib/ /usr/local/ptdata/lib/
 RUN echo /usr/local/ptdata/lib > /etc/ld.so.conf.d/ptdata.conf && ldconfig
 COPY tdi/fdp/ /usr/local/fdp/tdi/
-COPY tests/integration/check_mds_path.py tests/integration/check_pelican_path.py \
-     /usr/local/fdp/tests/
+# Only the shell check goes in: check_mds_path.py needs the MDSplus Python
+# bindings, which this image deliberately does not have -- it runs from the
+# host against a live connection instead, which also tests the environment the
+# SERVER has rather than the one podman exec would hand it.
+COPY --chmod=0755 tests/integration/check_pelican_path.sh /usr/local/fdp/tests/
 
 # MDS_PATH entries are searched IN ORDER and each one is searched RECURSIVELY.
 # Measured 2026-08-16 against a real MDSplus, because an earlier draft of the

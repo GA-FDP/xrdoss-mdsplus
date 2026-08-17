@@ -139,7 +139,7 @@ exists.
 **Files:**
 - Modify: `tests/survey_tdi_calls.py`
 
-- [ ] **Step 1: Add a global-reference scan**
+- [x] **Step 1: Add a global-reference scan**
 
 `survey_tdi_calls.py` classifies *calls*. Add a second pass over the same
 decompiled text that counts references to the public globals, since a read of
@@ -213,21 +213,41 @@ Three things this changes:
    cross-talk with it. **Do not set `__ptdata_pointname`/`__ptdata_shot`**,
    which would.
 
-- [ ] **Step 2: Run the record scan over a tree corpus — BLOCKED, needs a corpus**
+- [x] **Step 2: Run the record scan over a tree corpus — DONE 2026-08-16**
 
-The 36 trees the earlier survey used lived under `/tmp` and have been cleaned;
-this host has no Pelican-capable MDSplus environment to re-read them from the
-origin (`ptdata`'s `mds-validate` env has `mdsplus-xrdcl` but not
-`xrdcl-pelican-fdp`, so `pelican://` URLs will not open).
+Not blocked after all: seven pixi envs on this host carry both `mdsplus-xrdcl`
+and `xrdcl-pelican-fdp`, so the trees read straight off the Pelican origin and
+no local corpus is needed. (An earlier note here claimed otherwise; the check
+behind it was truncated by its own `head -3`.) The survey now accepts
+`tree:shot` specs resolved through the ambient tree path, which is what makes
+this reproducible without a corpus to lose:
 
-That the corpus evaporated is itself the finding: **no fetch script was ever
-committed**, so the survey is not reproducible. Write one before re-running —
-`tests/fetch_survey_trees.sh`, taking a tree/shot list and pulling the
-`.tree`/`.characteristics`/`.datafile` triples to a given root — otherwise the
-next session pays this cost again.
+```
+cd ../toksearch_d3d && pixi run bash -c \
+  "fdp run python ../xrdoss-mdsplus/tests/survey_tdi_calls.py \
+   bci:198873 bci:160062 ... transport:140054 --globals"
+```
 
-Run: `pixi run python tests/survey_tdi_calls.py --globals <treeroot>`
-Expected: a table. Record the totals here.
+Note the `bash -c`: `pixi run` does not word-split, so passing the spec list
+directly hands the whole thing over as one argv entry.
+
+**Result over 12 trees x 3 shots = 36 tree/shots, 298,973 records** (6 tree/shots
+do not exist for the older campaigns and reported cleanly; 2 device nodes were
+skipped and counted):
+
+| Global | Reads | Where |
+|---|---|---|
+| `__real32` | **400** | `bci/140054`, nodes `\BCI::TOP.DPD.R0.PHASE:PL1_UF_*` |
+| every other | **0** | — |
+
+So `__branch`, `__crate` and `__slot` are read by **nothing** — not by any site
+`.fun` (Step 1b) and not by any stored record in 298,973 of them. `PTDATA2.fun`
+sets them anyway: three assignments, no DFI-list guard, and the comment there
+cites this measurement.
+
+`__real32` is the one global a record reads directly, which independently
+confirms what Step 1b inferred from `pthead_real32.fun`: `PTHEAD2` must set all
+seven sections, and it does.
 
 Nothing below is blocked on this. Step 1b already justifies the conservative
 choice, and the interpretation rule below says what to do with either answer.
@@ -693,7 +713,7 @@ git commit -m "feat(tdi): PTHEAD2_ASCII over the header ABI"
 **Files:**
 - Modify: `Containerfile.mdsip`
 
-- [ ] **Step 1: Add the site TDI library**
+- [x] **Step 1: Add the site TDI library**
 
 One URL on the existing `dnf -y install`, next to the two MDSplus RPMs:
 
@@ -715,7 +735,7 @@ with a comment above the block:
 # GA host and cannot work here under either version.
 ```
 
-- [ ] **Step 2: Add a build stage for libptd3d**
+- [x] **Step 2: Add a build stage for libptd3d**
 
 ```dockerfile
 # --- ptdata build stage -----------------------------------------------------
@@ -756,7 +776,7 @@ not measured; `cmake -S cpp -LAH` lists the real ones. A wrong option name is
 ignored by CMake with only a warning, so a typo here silently builds *with*
 fdpio and the `readelf` line above is what catches it.
 
-- [ ] **Step 3: Copy the artifacts into the runtime stage**
+- [x] **Step 3: Copy the artifacts into the runtime stage**
 
 In the main stage, after the MDSplus install:
 
@@ -767,7 +787,7 @@ RUN echo /usr/local/ptdata/lib > /etc/ld.so.conf.d/ptdata.conf && ldconfig
 
 No compiler, no headers, no source — only the shared objects.
 
-- [ ] **Step 4: Install our TDI functions and set MDS_PATH**
+- [x] **Step 4: Install our TDI functions and set MDS_PATH**
 
 ```dockerfile
 COPY tdi/fdp/ /usr/local/fdp/tdi/
@@ -820,7 +840,7 @@ ENV PTDATA_JSON_INDEX_PATTERN=json_indexes_*
 ENV PTDATA_PTSERVERS=none
 ```
 
-- [ ] **Step 5: Build the Pelican-path chain**
+- [x] **Step 5: Build the Pelican-path chain**
 
 ```dockerfile
 # The index records absolute Pelican URLs:
@@ -837,7 +857,7 @@ RUN mkdir -p '/pelican:/osg-htc.org:443' \
  && mkdir -p /fdp-archives/archives/ptdata /ptdata-index
 ```
 
-- [ ] **Step 6: Make the working directory explicit**
+- [x] **Step 6: Make the working directory explicit**
 
 socat's child inherits socat's cwd, so `WORKDIR` alone is not enough. Add
 `cd /` to `fdp-mdsip-connection`, above the `exec`:
@@ -856,7 +876,7 @@ and assert it in the same `RUN` block that checks for `-m`:
     grep -q '^cd /$' /usr/local/bin/fdp-mdsip-connection; \
 ```
 
-- [ ] **Step 7: Build the image**
+- [x] **Step 7: Build the image**
 
 Run: `podman build -f Containerfile.mdsip -t fdp-mdsip .`
 Expected: builds; the in-build `readelf` and `test -f` assertions pass.
@@ -949,7 +969,7 @@ git commit -m "feat(sandbox): read-only shotfile and index mounts"
 - Modify: `tests/mkpath.py` (the fixture tree gains an embedded-record node)
 - Modify: `tests/security/verify_sandbox.py`
 
-- [ ] **Step 1: A check that MDS_PATH resolves every function we depend on**
+- [x] **Step 1: A check that MDS_PATH resolves every function we depend on**
 
 The spec asks for one that "fails loudly when `MDS_PATH` resolves `PTDATA2` but
 not its helpers" — the flat-list failure mode.
@@ -1083,7 +1103,7 @@ if arr.size <= 1:
 Run: `bash tests/integration/test_ptdata_tdi.sh`
 Expected: the embedded node returns the same array the direct call does.
 
-- [ ] **Step 4: A check that the Pelican-path chain resolves, and that cwd is `/`**
+- [x] **Step 4: A check that the Pelican-path chain resolves, and that cwd is `/`**
 
 ```python
 #!/usr/bin/env python
