@@ -881,7 +881,7 @@ and assert it in the same `RUN` block that checks for `-m`:
 Run: `podman build -f Containerfile.mdsip -t fdp-mdsip .`
 Expected: builds; the in-build `readelf` and `test -f` assertions pass.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add Containerfile.mdsip
@@ -900,7 +900,7 @@ Both, in the same commit. The quadlet's own header says every option mirrors
 the script; a control in one and not the other is the failure that arrangement
 exists to prevent.
 
-- [ ] **Step 1: Add the mounts to the script**
+- [x] **Step 1: Add the mounts to the script**
 
 Next to `TREES`/`TREE_MOUNT`:
 
@@ -930,7 +930,7 @@ fi
 and `"${PTDATA_FLAGS[@]}"` in the `podman run` invocation, in the filesystem
 group next to the tree mount.
 
-- [ ] **Step 2: Add them to the quadlet**
+- [x] **Step 2: Add them to the quadlet**
 
 ```
 # PTData shotfiles and the JSON index, read-only. Nested to match the absolute
@@ -939,7 +939,7 @@ Volume=/mnt/beegfs/data/archives/ptdata:/fdp-archives/archives/ptdata:ro
 Volume=/mnt/beegfs/data/archives/index/json:/ptdata-index:ro
 ```
 
-- [ ] **Step 3: Start it and check the mounts landed**
+- [x] **Step 3: Start it and check the mounts landed**
 
 ```bash
 MDSIP_PTDATA_ARCHIVE=/mnt/beegfs/data/archives/ptdata \
@@ -1066,7 +1066,7 @@ print(f"ok: {point} shot {shot}: {arr.size} samples, PTNPTS={npts}, "
 EOF
 ```
 
-- [ ] **Step 3: A fixture tree whose node record embeds a PTDATA2 call**
+- [x] **Step 3: A fixture tree whose node record embeds a PTDATA2 call**
 
 Steps 2's `conn.get('PTDATA2(...)')` evaluates an expression the *client* sent.
 The failure this whole project exists to fix is different: a **stored record**
