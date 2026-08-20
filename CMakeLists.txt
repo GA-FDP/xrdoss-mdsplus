@@ -187,12 +187,45 @@ if(BUILD_CLIENT)
             DESTINATION ${CMAKE_INSTALL_DATADIR}/fdp/tdi)
 endif()
 
+# libptd3d, for the HTTP point endpoint. Built PTDATA_WITH_FDPIO=OFF and
+# PTDATA_WITH_HTTP=OFF so the library is physically incapable of remote I/O:
+# the origin reads local files, and a library that cannot reach the network
+# cannot be turned into an egress path.
+#
+# Optional on purpose. The relay predates this and must keep building where
+# libptd3d is not installed; the point endpoint simply is not built there.
+set(PTDATA_ROOT "" CACHE PATH "libptd3d install prefix")
+find_path(PTDATA_INCLUDE_DIR NAMES ptdata/shot_locator.h
+    HINTS ${PTDATA_ROOT}/include/ptd3d $ENV{PTDATA_ROOT}/include/ptd3d
+          ${CMAKE_PREFIX_PATH}/include/ptd3d)
+find_library(PTDATA_LIBRARY NAMES ptd3d
+    HINTS ${PTDATA_ROOT}/lib ${PTDATA_ROOT}/lib64 $ENV{PTDATA_ROOT}/lib
+          ${CMAKE_PREFIX_PATH}/lib)
+
+if(PTDATA_INCLUDE_DIR AND PTDATA_LIBRARY)
+    set(HAVE_PTDATA TRUE)
+    message(STATUS "Found libptd3d: ${PTDATA_LIBRARY}")
+    add_library(pointcore OBJECT src/ArchiveIo.cc)
+    target_include_directories(pointcore PRIVATE src ${PTDATA_INCLUDE_DIR})
+else()
+    set(HAVE_PTDATA FALSE)
+    message(STATUS "libptd3d not found; the HTTP point endpoint will not be built")
+endif()
+
 if(BUILD_TESTS)
     enable_testing()
     find_path(DOCTEST_INCLUDE_DIR NAMES doctest/doctest.h
         HINTS ${CMAKE_PREFIX_PATH}/include $ENV{PREFIX}/include $ENV{CONDA_PREFIX}/include)
     if(NOT DOCTEST_INCLUDE_DIR)
         message(FATAL_ERROR "doctest not found; add doctest to pixi.toml dependencies")
+    endif()
+
+    if(HAVE_PTDATA)
+        add_executable(test_archiveio tests/test_archiveio.cpp $<TARGET_OBJECTS:pointcore>)
+        target_include_directories(test_archiveio PRIVATE src ${PTDATA_INCLUDE_DIR}
+                                   ${DOCTEST_INCLUDE_DIR})
+        target_link_libraries(test_archiveio ${PTDATA_LIBRARY} pthread)
+        add_test(NAME archiveio COMMAND test_archiveio)
     endif()
 
     foreach(t base64url tdipath treeversion resultcache)
