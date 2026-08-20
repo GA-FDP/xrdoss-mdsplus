@@ -22,6 +22,8 @@
 #include "MdsipSession.hh"
 
 #include "XrdHttp/XrdHttpExtHandler.hh"
+
+#include "PointStore.hh"
 #include "XrdOuc/XrdOucEnv.hh"
 #include "XrdOuc/XrdOucErrInfo.hh"
 #include "XrdSec/XrdSecEntity.hh"
@@ -90,6 +92,48 @@ std::string UrlEncode(const std::string &s) {
     return out;
 }
 
+// Percent-decode one path segment. Pointnames are uppercase alphanumerics plus
+// a little punctuation, but the client percent-encodes the segment, so decode
+// it rather than assume which characters survived.
+std::string UrlDecode(const std::string &s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size() &&
+            std::isxdigit(static_cast<unsigned char>(s[i + 1])) &&
+            std::isxdigit(static_cast<unsigned char>(s[i + 2]))) {
+            out += static_cast<char>(std::strtol(s.substr(i + 1, 2).c_str(), 0, 16));
+            i += 2;
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+// "/165920/IP?ext=.MAG" -> shot "165920", pointname "IP".
+//
+// The query string is dropped: ?ext is a hint, and resolution here is
+// index-first, where JsonIndexPlugin::resolve takes only (pointname, shot).
+// The index decides which extension holds a pointname, and the response says
+// which one answered.
+bool SplitPointPath(const std::string &rest, std::string &shot,
+                    std::string &pointname) {
+    std::string path = rest;
+    const size_t q = path.find('?');
+    if (q != std::string::npos) path = path.substr(0, q);
+
+    if (path.empty() || path[0] != '/') return false;
+    const size_t sep = path.find('/', 1);
+    if (sep == std::string::npos) return false;
+
+    shot = path.substr(1, sep - 1);
+    pointname = UrlDecode(path.substr(sep + 1));
+    // Reject a trailing segment: /165920/IP/extra is not this contract.
+    if (pointname.empty() || pointname.find('/') != std::string::npos) return false;
+    return !shot.empty();
+}
+
 // XrdHttp lowercases header names; look the value up defensively either way.
 std::string HeaderValue(std::map<std::string, std::string> &headers,
                         const std::string &lower_name) {
@@ -109,12 +153,29 @@ public:
     HttpMdsipRelay(XrdSysError *log, const std::string &prefix,
                    const std::string &host, int port, int idle,
                    size_t max_sessions, int timeout_ms,
-                   XrdSfsFileSystem *sfs, const std::string &authpath)
+                   XrdSfsFileSystem *sfs, const std::string &authpath,
+                   const std::string &point_prefix,
+                   const std::string &point_authpath,
+                   fdp::PointStore *points)
         : log_(log), prefix_(prefix), sfs_(sfs), authpath_(authpath),
+          point_prefix_(point_prefix), point_authpath_(point_authpath),
+          points_(points),
           sessions_(host, port, idle, max_sessions, timeout_ms) {}
 
     bool MatchesPath(const char *verb, const char *path) {
         if (!path || !verb) return false;
+
+        // GET, only under the point prefix, and only when one is configured.
+        // The relay refuses GET below because it would shadow the object
+        // namespace the Oss plugin serves; that reasoning does not reach a
+        // disjoint prefix which is not a storage path.
+        if (std::strcmp(verb, "GET") == 0) {
+            if (point_prefix_.empty()) return false;
+            if (std::strncmp(path, point_prefix_.c_str(), point_prefix_.size()) != 0)
+                return false;
+            const char after = path[point_prefix_.size()];
+            return after == '\0' || after == '/';
+        }
 
         // POST and PUT, never GET. GET would shadow the object namespace the
         // Oss plugin serves, and this is an RPC channel rather than a resource.
@@ -147,6 +208,11 @@ public:
     int Init(const char *) { return 0; }
 
     int ProcessReq(XrdHttpExtReq &req) {
+        // Route on the request's own verb rather than anything remembered from
+        // MatchesPath: one handler instance serves every request, so a stashed
+        // flag would race across connections.
+        if (req.verb == "GET") return DoPoint(req);
+
         sessions_.ReapIdle();
 
         const std::string action = req.resource.substr(
@@ -201,7 +267,8 @@ private:
     //
     // The upshot: the relay is protected by whatever already protects the rest
     // of the origin, with no second token implementation to keep in step.
-    bool Authorized(XrdHttpExtReq &req, std::string &why) {
+    bool Authorized(XrdHttpExtReq &req, std::string &why,
+                    const std::string &authpath) {
         if (!sfs_) return true;   // auth=none; the loader has already warned
 
         // XrdAccSciTokens reads the token from the `authz` opaque, which is
@@ -212,7 +279,7 @@ private:
 
         struct stat sbuf;
         XrdOucErrInfo einfo;
-        const int rc = sfs_->stat(authpath_.c_str(), &sbuf, einfo,
+        const int rc = sfs_->stat(authpath.c_str(), &sbuf, einfo,
                                   &req.GetSecEntity(),
                                   opaque.empty() ? 0 : opaque.c_str());
         if (rc == SFS_OK) return true;
@@ -225,7 +292,7 @@ private:
         if (err == ENOENT) return true;
 
         const char *text = einfo.getErrText();
-        why = std::string("not authorized for ") + authpath_ +
+        why = std::string("not authorized for ") + authpath +
               (text && *text ? std::string(": ") + text : std::string());
         return false;
     }
@@ -237,7 +304,7 @@ private:
         // is deliberate: re-authorizing every call would add a round trip to a
         // workload that is thousands of one-signal gets.
         std::string why;
-        if (!Authorized(req, why))
+        if (!Authorized(req, why, authpath_))
             return Fail(req, 401, "Unauthorized", why);
 
         std::string error;
@@ -269,6 +336,58 @@ private:
                                   static_cast<long long>(answer.size()));
     }
 
+    // GET <point_prefix>/<shot>/<pointname>[?ext=...]
+    //
+    // Authorized per request, unlike the relay's session. Each GET is
+    // independent, so a session would buy nothing but a cache of
+    // authorization decisions.
+    int DoPoint(XrdHttpExtReq &req) {
+        if (!points_)
+            return Fail(req, 404, "Not Found", "point endpoint not configured");
+
+        std::string why;
+        if (!Authorized(req, why, point_authpath_))
+            return Fail(req, 401, "Unauthorized", why);
+
+        const std::string rest = req.resource.size() >= point_prefix_.size()
+            ? req.resource.substr(point_prefix_.size()) : std::string();
+
+        std::string shot_s, pointname;
+        if (!SplitPointPath(rest, shot_s, pointname))
+            return Fail(req, 404, "Not Found",
+                        "expected <prefix>/<shot>/<pointname>");
+
+        char *end = 0;
+        const long shot = std::strtol(shot_s.c_str(), &end, 10);
+        if (!end || *end != '\0' || shot <= 0)
+            return Fail(req, 400, "Bad Request",
+                        "shot must be a positive integer: " + shot_s);
+
+        fdp::PointStore::Record rec;
+        try {
+            rec = points_->Read(static_cast<int>(shot), pointname);
+        } catch (const std::exception &e) {
+            // A server fault -- unreadable file, malformed header. It must not
+            // reach the client as 404, or a broken origin reads as absent data
+            // and its provider chain quietly moves on.
+            return Fail(req, 500, "Internal Server Error", e.what());
+        }
+
+        if (!rec.found)
+            return Fail(req, 404, "Not Found",
+                        "no point " + pointname + " for shot " + shot_s);
+
+        // No trailing CRLF: XrdHttpProtocol appends one itself, and a second
+        // would end the header block early and truncate the response.
+        const std::string extra = rec.extension.empty()
+            ? std::string()
+            : "X-Ptdata-Extension: " + rec.extension;
+
+        return req.SendSimpleResp(200, "OK", extra.empty() ? 0 : extra.c_str(),
+                                  reinterpret_cast<const char *>(rec.bytes.data()),
+                                  static_cast<long long>(rec.bytes.size()));
+    }
+
     int DoClose(XrdHttpExtReq &req) {
         const std::string token = HeaderValue(req.headers, kSessionHeader);
         if (!token.empty()) sessions_.Close(token);
@@ -279,6 +398,9 @@ private:
     std::string       prefix_;
     XrdSfsFileSystem *sfs_;        // null when auth=none
     std::string       authpath_;   // the path whose policy gates a session
+    std::string       point_prefix_;   // empty => point endpoint disabled
+    std::string       point_authpath_; // the path whose policy gates a point read
+    fdp::PointStore       *points_;         // null => point endpoint disabled
     fdp::MdsipSessions sessions_;
 };
 
@@ -316,6 +438,15 @@ extern "C" XrdHttpExtHandler *XrdHttpGetExtHandler(XrdSysError *eDest,
     // The framework does hand us what is needed to do it ourselves, so this is
     // an opt-in rather than a gap. Since a session is arbitrary code execution
     // on the mdsip host, refuse to load unless told which mode this is.
+    // The point endpoint. Absent pointprefix leaves it off entirely, so this
+    // ships dark and an origin that only wants the relay is unaffected.
+    const std::string point_prefix    = ParmValue(parms, "pointprefix", "");
+    const std::string point_authpath  = ParmValue(parms, "pointauthpath", "");
+    const std::string point_index     = ParmValue(parms, "pointindex", "");
+    const std::string point_pattern   = ParmValue(parms, "pointindexpattern", "");
+    const std::string point_urlprefix = ParmValue(parms, "pointurlprefix", "");
+    const std::string point_root      = ParmValue(parms, "pointroot", "");
+
     const std::string auth = ParmValue(parms, "auth", "");
     const std::string authpath = ParmValue(parms, "authpath", prefix);
     XrdSfsFileSystem *sfs = 0;
@@ -348,9 +479,47 @@ extern "C" XrdHttpExtHandler *XrdHttpGetExtHandler(XrdSysError *eDest,
         return 0;
     }
 
+    // Refuse a half-configured endpoint. One that loads but cannot resolve
+    // answers 404 for every point, which reads as missing data rather than as
+    // a mistake -- the hardest kind of misconfiguration to trace.
+    fdp::PointStore *points = 0;
+    if (!point_prefix.empty()) {
+        if (point_index.empty()) {
+            eDest->Emsg("point", "refusing to load: pointprefix is set but "
+                        "pointindex is not, so every lookup would 404 and read "
+                        "as absent data rather than as misconfiguration.");
+            return 0;
+        }
+        if (point_authpath.empty()) {
+            eDest->Emsg("point", "refusing to load: pointprefix is set but "
+                        "pointauthpath is not. An ext handler runs BEFORE "
+                        "XRootD authorization, so without it the archive would "
+                        "be readable by anyone who can reach this port.");
+            return 0;
+        }
+        if (point_urlprefix.empty() != point_root.empty()) {
+            eDest->Emsg("point", "refusing to load: pointurlprefix and "
+                        "pointroot must be set together -- one alone silently "
+                        "disables the rewrite, and every index entry then "
+                        "resolves as a missing file.");
+            return 0;
+        }
+        try {
+            points = new fdp::PointStore(point_index, point_pattern,
+                                    point_urlprefix, point_root);
+        } catch (const std::exception &e) {
+            eDest->Emsg("point", "refusing to load: cannot open the point "
+                        "index:", e.what());
+            return 0;
+        }
+        const std::string pbanner = point_prefix + " -> index " + point_index;
+        eDest->Say("++++++ XrdHttpMdsip point endpoint: ", pbanner.c_str());
+    }
+
     const std::string banner = prefix + " -> mdsip " + host + ":" + port_str;
     eDest->Say("++++++ XrdHttpMdsip relay: ", banner.c_str());
 
     return new HttpMdsipRelay(eDest, prefix, host, port, idle, max_sessions,
-                              timeout_ms, sfs, authpath);
+                              timeout_ms, sfs, authpath,
+                              point_prefix, point_authpath, points);
 }
