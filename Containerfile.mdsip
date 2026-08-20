@@ -30,7 +30,7 @@
 # sandbox whose threat model assumes the client already has code execution.
 FROM almalinux:9 AS ptdata-build
 
-ARG PTDATA_VERSION=2.2.0
+ARG PTDATA_VERSION=2.3.0
 
 RUN dnf -y install gcc-c++ cmake make tar gzip \
  && dnf clean all && rm -rf /var/cache/dnf
@@ -46,6 +46,13 @@ RUN dnf -y install gcc-c++ cmake make tar gzip \
 COPY ptdata-src.tar.gz /tmp/ptdata.tar.gz
 RUN mkdir -p /tmp/ptdata \
  && tar -xzf /tmp/ptdata.tar.gz -C /tmp/ptdata --strip-components=1
+
+# The tarball comes from the build context, so nothing else ties it to the ARG
+# above -- a stale ptdata-src.tar.gz would build a different ptdata than this
+# file claims, silently. `python/ptdata/_version.py` is marked export-subst, so
+# an archive made from a tag carries that tag in git_refnames; this checks it.
+RUN grep -q "tag: release-${PTDATA_VERSION}" /tmp/ptdata/python/ptdata/_version.py \
+ || { echo "ptdata-src.tar.gz is not release-${PTDATA_VERSION}; re-run scripts/fetch-ptdata-src.sh"; exit 1; }
 
 # CMAKE_INSTALL_LIBDIR is set explicitly because GNUInstallDirs resolves it to
 # lib64 on the RHEL family. Without this the library installs to

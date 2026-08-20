@@ -75,9 +75,16 @@ RUN set -eux; \
 # the image history. Produce it first:
 #
 #   scripts/fetch-ptdata-src.sh 2.2.0
+ARG PTDATA_VERSION=2.3.0
+
 COPY ptdata-src.tar.gz /tmp/ptdata.tar.gz
 RUN mkdir -p /tmp/ptdata \
  && tar -xzf /tmp/ptdata.tar.gz -C /tmp/ptdata --strip-components=1
+
+# Same check as Containerfile.mdsip, for the same reason: the tarball arrives
+# through the build context and nothing else ties it to the ARG above.
+RUN grep -q "tag: release-${PTDATA_VERSION}" /tmp/ptdata/python/ptdata/_version.py \
+ || { echo "ptdata-src.tar.gz is not release-${PTDATA_VERSION}; re-run scripts/fetch-ptdata-src.sh"; exit 1; }
 
 # Static, and incapable of remote I/O: the origin reads local files, and a
 # library that cannot reach the network cannot be turned into an egress path.
