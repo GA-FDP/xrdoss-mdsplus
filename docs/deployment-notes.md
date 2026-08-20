@@ -55,7 +55,19 @@ volume_path = "/local-scratch/<user>/containers/storage/volumes"
 ```
 
 plus `XDG_RUNTIME_DIR` pointed at a writable 0700 directory for the rootless
-pause process. `tests/fed/fedbox.sh`, `scripts/mdsip-sandbox.sh` and
+pause process.
+
+A second failure mode looks unrelated and is not: containers starting with an
+**empty rootfs**, so the first command in any image fails with
+`stat /bin/sh: no such file or directory` — including a bare
+`podman run almalinux:9 echo`. The images are fine; the runRoot and graphRoot
+have gone out of step, which is what happens when one of them is wiped
+underneath the other. `podman system migrate` does not clear it. `podman system
+reset` does, at the cost of every local image. To get work done without paying
+that, give podman a wholly separate state by overriding `HOME`,
+`XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `XDG_RUNTIME_DIR` together, with a
+`storage.conf` naming fresh `graphRoot`/`runRoot` paths — the existing store is
+then left untouched for a reset at a convenient moment. `tests/fed/fedbox.sh`, `scripts/mdsip-sandbox.sh` and
 `tests/security/verify_sandbox.sh` set the latter automatically when
 `/run/user/$UID` is absent.
 
@@ -276,3 +288,139 @@ Note the **unsuffixed** library name: XRootD appends the plugin version itself.
   of the sensible choices — a token scoped narrowly to the archive satisfies it,
   whereas `/fdp-d3d` would demand read on the namespace root and refuse that
   same token.
+
+## The point endpoint
+
+`GET <prefix>/<shot>/<pointname>` returning one PTData record's raw bytes, so a
+remote client needs neither a shot index nor XRootD. Client half and wire
+contract: GA-FDP/ptdata#42, #46. Design:
+`docs/superpowers/specs/2026-08-19-http-point-endpoint-server-design.md`.
+
+### It rides the relay's handler, and has to
+
+XRootD allows **four** HTTP ext handlers — `MAX_XRDHTTPEXTHANDLERS` in
+`XrdHttpProtocol.hh`, and a fifth is a startup abort, not a degradation:
+
+```
+Config: Cannot load one more exthandler. Max is 4
+```
+
+Pelican loads three and `XrdHttpMdsip` is the fourth, so the point endpoint is a
+second route inside the existing handler rather than a plugin of its own. That
+also means it consumes **no additional slot** and needs no second config line.
+
+### The config line
+
+```
+http.exthandler mdsip /plugins/libXrdHttpMdsip.so \
+    prefix=/mdsip,host=<mdsip-host>,port=8000,auth=xrootd,authpath=/fdp-d3d/archives/mdsplus,\
+    pointprefix=/fdp-d3d/ptdata,pointauthpath=/fdp-d3d/archives/ptdata,\
+    pointindex=/ptdata-index,pointindexpattern=json_indexes_*,\
+    pointurlprefix=pelican://osg-htc.org:443/fdp-d3d/archives,pointroot=/fdp-archives
+```
+
+Omit `pointprefix` and the endpoint does not exist — the relay behaves exactly
+as before, so this can ship dark and be turned on deliberately.
+
+The handler **refuses to load** rather than start half-configured: `pointprefix`
+without `pointindex`, without `pointauthpath` under `auth=xrootd`, or with only
+one of `pointurlprefix`/`pointroot`. Each of those would otherwise answer 404
+for every point, which reads as missing data rather than as a mistake.
+
+- **`pointprefix=/fdp-d3d/ptdata`** is what a client's
+  `http_endpoint=https://<origin>:8443/fdp-d3d` resolves against, since the
+  client appends `/ptdata/<shot>/<pointname>` itself. Note it is *not*
+  `/fdp-d3d/archives/ptdata`, where the shot files actually live in the object
+  namespace; the bare path is unused and claiming it reserves it.
+- **`pointauthpath=/fdp-d3d/archives/ptdata`** — the ptdata archive root, the
+  analogue of the relay's `/fdp-d3d/archives/mdsplus`. Point it at what clients'
+  tokens actually cover, not at the handler's own prefix, or every real token is
+  refused. Authorization is checked per request; unlike the relay's session,
+  each GET is independent.
+- **`pointurlprefix` / `pointroot`** rewrite the absolute `pelican://` URLs the
+  JSON index records onto the local archive. The mdsip sandbox does the same job
+  with a symlink chain that depends on the process working directory being `/`;
+  that is not available here, because the handler is loaded into Pelican's
+  `xrootd` and its cwd is not ours to set.
+
+### Two more read-only bind mounts
+
+| Host | Container | Contents |
+|---|---|---|
+| `<archive>/ptdata` | `<pointroot>/ptdata` | shot files |
+| `<archive>/index/json` | `/ptdata-index` | index snapshots |
+
+Resolution is **index-only**: no `SYS_D3` scan and no ptserver tier exist in
+this path at all, so an index miss is absent data and can never become a socket
+attempt. Coverage therefore equals the snapshot's coverage — a shot on disk but
+absent from the index is unavailable, and the fix is a fresher index.
+
+### The plugin must be built in-image
+
+Not a preference — measured:
+
+| built by | max GLIBCXX required | loads on the origin? |
+|---|---|---|
+| conda toolchain | `3.4.31` | **no** |
+| in-image toolchain | `3.4.29` | yes |
+
+AlmaLinux 9 provides up to `GLIBCXX_3.4.29`. The relay alone needs only
+`3.4.21`, which is why it has shipped from conda; libptd3d is C++20 and moves
+the floor past what the image has. `Containerfile.build` builds it in-image and
+asserts the result, and the CMake option is opt-in (`BUILD_POINT=ON`) so a conda
+build cannot quietly acquire an unloadable plugin.
+
+Note `3.4.29` is exactly the ceiling: there is no headroom, and any future
+dependency wanting a newer libstdc++ feature breaks loading. The build assertion
+catches that rather than the origin failing to start.
+
+libptd3d is linked **statically** (`-DPTDATA_BUILD_STATIC=ON`, ptdata#47), built
+`-DPTDATA_WITH_FDPIO=OFF -DPTDATA_WITH_HTTP=OFF` so it is incapable of remote
+I/O. The plugin's `NEEDED` list is asserted to contain no `ptd3d`, `curl`,
+`fdpio`, `XrdCl` or MDSplus entry.
+
+### Two traps that cost real time
+
+- **The library name in the config must be UNSUFFIXED.** `XrdOucPinLoader`
+  appends the plugin version, so writing `libXrdHttpMdsip-5.so` has XRootD look
+  for `libXrdHttpMdsip-5-5.so`. Already true for the relay; easy to repeat.
+- **Without TLS, XRootD loads only ext handlers declared `+notls`** — and says
+  nothing about the ones it skips. The directive is still echoed at startup, so
+  the symptom is XRootD answering **403** for the endpoint's own paths, which
+  reads like an authorization problem rather than a handler that never loaded.
+  Production configures HTTPS and must **not** use `+notls`;
+  `tests/integration/point-endpoint.cfg` does, because it serves plain HTTP on
+  loopback.
+
+### Verifying it after the change
+
+The origin log should carry, at startup:
+
+```
+Plugin loaded XrdHttpMdsip ... from exthandlerlib .../libXrdHttpMdsip-5.so
+++++++ XrdHttpMdsip point endpoint: /fdp-d3d/ptdata -> index /ptdata-index
+```
+
+Absence of the second line means the handler loaded without the endpoint, which
+is a configuration problem, not a runtime one.
+
+Then, end to end, from a client with a token:
+
+```bash
+curl -sD - -o /dev/null -H "Authorization: Bearer $BEARER_TOKEN" \
+  "https://<origin>:8443/fdp-d3d/ptdata/165920/IP"
+# HTTP/1.1 200 OK
+# X-Ptdata-Extension: .MAG
+```
+
+`tests/integration/test_point_endpoint.sh` runs the client's full contract suite
+against a container serving the real plugin, which is the same set of assertions
+GA-FDP/ptdata makes against its stub.
+
+### The three configuration surfaces still have to move together
+
+`scripts/mdsip-sandbox.sh`, `deploy/fdp-mdsip.container`, and
+`d3d-origin-admin`'s `site.env` + `etc/fdp-mdsip.container.in`. A control present
+in one and missing from another is exactly the failure that arrangement exists
+to prevent, and the point endpoint adds six parameters and two mounts to keep in
+step.
