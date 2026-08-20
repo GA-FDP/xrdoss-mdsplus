@@ -126,49 +126,117 @@ not cached by `XrdAccSciTokens` it would show up directly in the numbers.
 
 ## Data path
 
-`PtDataReader::read_point_bytes(shot, source, pointname)` — made public in
-ptdata#46 for exactly this. It locates, opens, finds and reads one record, and
-reads only what it needs rather than pulling a whole shot file (a `.MAG` can be
-309 MB).
+Resolution is **index first**, exactly as the mdsip sandbox does it
+(`2026-08-13-ptdata-in-the-mdsip-sandbox-design.md`). That spec states the
+reason plainly and it applies here unchanged: *a directory scan is too slow*.
 
-libptd3d is built `-DPTDATA_WITH_FDPIO=OFF`: the origin reads local files, and
-a library physically incapable of remote I/O cannot be turned into an egress
-path. `Containerfile.mdsip` already builds it this way, and
-`scripts/fetch-ptdata-src.sh` already delivers the source into a build context
-without putting credentials in an image — both reusable.
+```
+PTDATA_JSON_INDEX_DIR      /ptdata-index
+PTDATA_JSON_INDEX_PATTERN  json_indexes_*
+PTDATA_PTSERVERS           none
+SYS_D3                     unset
+```
 
-### Extension resolution comes for free
+Three variables, not four: `JsonIndexPlugin` is compiled into `libptd3d` and
+`index_plugin_from_env()` reaches it first, so no `PTDATA_PLUGIN_LIB` is needed
+— that names the *dynamic* plugin fallback, which this does not use.
 
-`ShotLocator` already does what the contract asks. Tier 2a tries the requested
-source pointname-aware, so a shot file that lacks the pointname falls through
-rather than answering; tier 2b (`scan_for_pointname`, legacy PTSEARCH0)
-enumerates `<shot>.*` and returns the first whose directory holds it.
+`PTDATA_PTSERVERS=none` is not optional, for the same reason it is not optional
+in the sandbox: `-DPTDATA_WITH_FDPIO=OFF` removes remote *file* access but not
+ptserver, which is a raw socket. Without the sentinel an index miss becomes a
+connection attempt, reported as a network error rather than as absent data.
 
-Crucially that scan is **local-SYS_D3 only** — `IoProvider::list_files` is a
-no-op for remote providers — which is precisely the origin's situation. So the
-handler passes `?ext` straight through as `source` and lets ptdata resolve. No
-candidate loop server-side. (ptdata's own test stub loops a hardcoded candidate
-list; the real server should not, and the difference is worth knowing when
-reading those tests.)
+An earlier revision of this section had the server scanning `SYS_D3` and
+resolving extensions through `ShotLocator`'s tier-2b `scan_for_pointname`. That
+was wrong twice over, and the corrections are worth stating because both
+mistakes are easy to repeat.
 
-### One gap: `X-Ptdata-Extension`
+**The scan is not cheap here.** Tier 2a costs two stats per `SYS_D3` directory
+and the archive spans `ptdata1..ptdatae`, while tier 2b calls `list_files` on
+each search directory and then *opens each candidate shotfile* to inspect its
+directory. On `/mnt/beegfs` every one of those is a metadata round trip to a
+parallel filesystem, not a local `stat`. The sandbox measured this and chose
+index-only.
 
-The resolved extension is not recoverable from `read_point_bytes`. It exists
-internally — `ShotLocator::Located::source_description` carries `"file: <path>"`
-— but that is not on any public return, and `FetchedPoint::actual_extension` is
-documented as `nullopt` for local file readers precisely because the file path
-never had a way to report it.
+**The index is usable on the origin**, which the earlier text denied on the
+grounds that its entries are `pelican://` URLs and a `PTDATA_WITH_FDPIO=OFF`
+build cannot open those. The build genuinely cannot — and does not need to.
+The sandbox's workaround needs no code at all:
 
-**Prerequisite: a small ptdata addition** giving `read_point_bytes` a way to
-report the extension it resolved — an overload with an out-parameter, or a
-struct return. Parsing it back out of `source_description` would work and should
-not be done.
+```json
+".PCE": "pelican://osg-htc.org:443/fdp-d3d/archives/ptdata/ptdatac/19887x/198873.PCE"
+```
 
-The header is informational: it lets a client detect server-side fallthrough
-(`.MAG` → `.MGB`). If it is absent the client sets `nullopt`, which is what the
-local-file path already does, so the contract degrades gracefully and this does
-not block a first cut. It should not ship missing, though — a contract term that
-is never populated rots.
+That string does not begin with `/`, so it is a **relative** path, and POSIX
+collapses the consecutive slashes. With the working directory at `/` it
+resolves as `/pelican:/osg-htc.org:443/fdp-d3d/archives/...`, and the image
+carries that directory chain with its last component symlinked at the root the
+index paths are relative to:
+
+```
+/pelican:/osg-htc.org:443/fdp-d3d  ->  /fdp-archives
+/fdp-archives/archives/ptdata          ro mount
+```
+
+`LocalIoProvider::resolve()` returns its argument unchanged, so the literal URL
+string reaches `::open()` and succeeds. Verified in the sandbox.
+
+### What this costs the origin container
+
+Unlike the relay, which needed only the `.so` and a config fragment, this needs
+the same mount-and-symlink arrangement inside the **Pelican origin** container
+rather than in an image we build ourselves:
+
+| Host | Container | Contents |
+|---|---|---|
+| `<archive>/ptdata` | `/fdp-archives/archives/ptdata` | shotfiles, ro |
+| `<archive>/index/json` | `/ptdata-index` | index snapshots, ro |
+
+plus the `/pelican:/osg-htc.org:443/fdp-d3d -> /fdp-archives` symlink chain,
+which a bind mount can supply.
+
+**The working directory must be `/`.** The sandbox hit this: a child inherits
+its parent's cwd, and the relative-path trick fails anywhere else. Whether
+XRootD's cwd is `/` in the origin container **must be checked before building
+on this**, and if it is not, the handler should `chdir` or resolve the index
+path itself rather than depend on it.
+
+Two further inherited caveats, both from the sandbox spec:
+
+- **The Pelican host and federation prefix are encoded in a directory name.**
+  If either changes, every lookup fails as "file not found" with nothing
+  pointing at the cause.
+- **Coverage equals the index's coverage.** A shot on disk but absent from the
+  snapshot is unavailable. This is the one real cost of index-first, and it
+  weakens — does not remove — the claim in the client spec that the endpoint
+  closes the index-staleness gap. It closes it for clients *without* an index;
+  the origin still sees what its own snapshot sees. The honest fix is the one
+  the sandbox spec already defers: have the indexer record archive-relative
+  paths, which would also retire the symlink chain.
+
+### Reading the record
+
+`ShotLocator` is public (`ptdata/shot_locator.h`), and `locate_point` returns
+`Located{ variant<ShotFile, FetchedPoint>, source_description }`. Using it
+directly gives the handler both halves of the response in one lookup: the
+`ShotFile` to `find` and `read_point` from, and a `source_description` of
+`"index: <path>"` naming the file that answered.
+
+`PtDataReader::read_point_bytes` is the simpler call and returns only bytes.
+Either works; the locator is preferred because of the header below.
+
+### `X-Ptdata-Extension` needs no ptdata change
+
+The earlier revision called this a gap requiring a new API. It is not, once
+resolution is index-first. `IndexPlugin::resolve(pointname, shot)` returns the
+path it chose, and the extension is its suffix — reachable either from that
+call directly or from `Located::source_description`.
+
+Note that tier 1 **ignores the requested source**: `resolve` takes only
+`(pointname, shot)`, so the index decides which extension holds a pointname.
+That is compatible with the contract — `?ext` is a hint, and a server is free
+to resolve — but it means the hint is not consulted at all in this deployment,
+and `X-Ptdata-Extension` is how the client learns what actually answered.
 
 ## Threading
 
