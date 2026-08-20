@@ -490,11 +490,15 @@ extern "C" XrdHttpExtHandler *XrdHttpGetExtHandler(XrdSysError *eDest,
                         "as absent data rather than as misconfiguration.");
             return 0;
         }
-        if (point_authpath.empty()) {
-            eDest->Emsg("point", "refusing to load: pointprefix is set but "
-                        "pointauthpath is not. An ext handler runs BEFORE "
-                        "XRootD authorization, so without it the archive would "
-                        "be readable by anyone who can reach this port.");
+        // Only meaningful when authorization is delegated: with auth=none
+        // Authorized() returns true before ever looking at a path, so
+        // demanding one there would force a value that changes nothing.
+        if (auth == "xrootd" && point_authpath.empty()) {
+            eDest->Emsg("point", "refusing to load: pointprefix is set with "
+                        "auth=xrootd but pointauthpath is not. An ext handler "
+                        "runs BEFORE XRootD authorization, so without it the "
+                        "archive would be readable by anyone who can reach "
+                        "this port.");
             return 0;
         }
         if (point_urlprefix.empty() != point_root.empty()) {
