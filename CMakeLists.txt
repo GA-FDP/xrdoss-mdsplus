@@ -76,6 +76,36 @@ if(NEED_CURL)
     find_package(CURL REQUIRED)
 endif()
 
+# libptd3d, for the HTTP point endpoint. Built PTDATA_WITH_FDPIO=OFF and
+# PTDATA_WITH_HTTP=OFF so the library is physically incapable of remote I/O:
+# the origin reads local files, and a library that cannot reach the network
+# cannot be turned into an egress path.
+#
+# Optional on purpose. The relay predates this and must keep building where
+# libptd3d is not installed; the point endpoint simply is not built there.
+set(PTDATA_ROOT "" CACHE PATH "libptd3d install prefix")
+find_path(PTDATA_INCLUDE_DIR NAMES ptdata/shot_locator.h
+    HINTS ${PTDATA_ROOT}/include/ptd3d $ENV{PTDATA_ROOT}/include/ptd3d
+          ${CMAKE_PREFIX_PATH}/include/ptd3d)
+find_library(PTDATA_LIBRARY NAMES ptd3d
+    HINTS ${PTDATA_ROOT}/lib ${PTDATA_ROOT}/lib64 $ENV{PTDATA_ROOT}/lib
+          ${CMAKE_PREFIX_PATH}/lib)
+
+if(PTDATA_INCLUDE_DIR AND PTDATA_LIBRARY)
+    set(HAVE_PTDATA TRUE)
+    message(STATUS "Found libptd3d: ${PTDATA_LIBRARY}")
+    add_library(pointcore OBJECT src/ArchiveIo.cc src/PointStore.cc)
+    target_include_directories(pointcore PRIVATE src ${PTDATA_INCLUDE_DIR})
+    # ptdata's headers need C++20 (std::span, std::optional). Raised only on
+    # these targets: the rest of the repo is C++14 for XRootD and MDSplus, and
+    # PointStore.hh deliberately exposes no ptdata type so nothing else has to
+    # move.
+    target_compile_features(pointcore PUBLIC cxx_std_20)
+else()
+    set(HAVE_PTDATA FALSE)
+    message(STATUS "libptd3d not found; the HTTP point endpoint will not be built")
+endif()
+
 if(BUILD_OSS OR BUILD_TESTS)
     add_library(core OBJECT
         src/Base64Url.cc
@@ -121,14 +151,29 @@ endif()
 
 # The mdsip-over-HTTPS relay: an XrdHttpExtHandler on the origin's own port.
 if(BUILD_RELAY)
+    if(HAVE_PTDATA)
+        # The point endpoint rides the existing handler: XRootD allows four
+        # HTTP ext handlers (MAX_XRDHTTPEXTHANDLERS) and Pelican plus this
+        # relay already use all four, so a fifth would be a startup abort.
+        set(POINT_OBJECTS $<TARGET_OBJECTS:pointcore>)
+    else()
+        set(POINT_OBJECTS "")
+    endif()
+
     add_library(XrdHttpMdsip MODULE
         src/HttpRelay.cc
         $<TARGET_OBJECTS:relaycore>
+        ${POINT_OBJECTS}
     )
     target_include_directories(XrdHttpMdsip PRIVATE src ${XROOTD_INCLUDE_DIR}
                                ${XROOTD_VENDORED_INCLUDE_DIR})
     target_link_directories(XrdHttpMdsip PRIVATE ${XROOTD_LIB_DIR})
     target_link_libraries(XrdHttpMdsip XrdUtils ${XROOTD_HTTPUTILS_LIB} pthread)
+    if(HAVE_PTDATA)
+        # HttpRelay.cc stays at the repo's C++14: PointStore.hh is a PIMPL and
+        # exposes no ptdata type, so only pointcore needs C++20.
+        target_link_libraries(XrdHttpMdsip ${PTDATA_LIBRARY})
+    endif()
     # Same -5 suffix rule as the osslib above: XrdOucPinLoader appends the plugin
     # version, so configs must reference the UNSUFFIXED name.
     set_target_properties(XrdHttpMdsip PROPERTIES PREFIX "lib" OUTPUT_NAME "XrdHttpMdsip-5")
@@ -185,36 +230,6 @@ if(BUILD_CLIENT)
     endif()
     install(FILES ${FDP_TDI_FUNS}
             DESTINATION ${CMAKE_INSTALL_DATADIR}/fdp/tdi)
-endif()
-
-# libptd3d, for the HTTP point endpoint. Built PTDATA_WITH_FDPIO=OFF and
-# PTDATA_WITH_HTTP=OFF so the library is physically incapable of remote I/O:
-# the origin reads local files, and a library that cannot reach the network
-# cannot be turned into an egress path.
-#
-# Optional on purpose. The relay predates this and must keep building where
-# libptd3d is not installed; the point endpoint simply is not built there.
-set(PTDATA_ROOT "" CACHE PATH "libptd3d install prefix")
-find_path(PTDATA_INCLUDE_DIR NAMES ptdata/shot_locator.h
-    HINTS ${PTDATA_ROOT}/include/ptd3d $ENV{PTDATA_ROOT}/include/ptd3d
-          ${CMAKE_PREFIX_PATH}/include/ptd3d)
-find_library(PTDATA_LIBRARY NAMES ptd3d
-    HINTS ${PTDATA_ROOT}/lib ${PTDATA_ROOT}/lib64 $ENV{PTDATA_ROOT}/lib
-          ${CMAKE_PREFIX_PATH}/lib)
-
-if(PTDATA_INCLUDE_DIR AND PTDATA_LIBRARY)
-    set(HAVE_PTDATA TRUE)
-    message(STATUS "Found libptd3d: ${PTDATA_LIBRARY}")
-    add_library(pointcore OBJECT src/ArchiveIo.cc src/PointStore.cc)
-    target_include_directories(pointcore PRIVATE src ${PTDATA_INCLUDE_DIR})
-    # ptdata's headers need C++20 (std::span, std::optional). Raised only on
-    # these targets: the rest of the repo is C++14 for XRootD and MDSplus, and
-    # PointStore.hh deliberately exposes no ptdata type so nothing else has to
-    # move.
-    target_compile_features(pointcore PUBLIC cxx_std_20)
-else()
-    set(HAVE_PTDATA FALSE)
-    message(STATUS "libptd3d not found; the HTTP point endpoint will not be built")
 endif()
 
 if(BUILD_TESTS)
