@@ -57,6 +57,7 @@ RUN cmake -S /tmp/ptdata/cpp -B /tmp/ptdata/build \
         -DCMAKE_INSTALL_PREFIX=/usr/local/ptdata \
         -DCMAKE_INSTALL_LIBDIR=lib \
         -DPTDATA_WITH_FDPIO=OFF \
+        -DPTDATA_WITH_HTTP=OFF \
         -DPTDATA_BUILD_PYTHON=OFF \
         -DPTDATA_BUILD_TESTS=OFF \
  && cmake --build /tmp/ptdata/build -j"$(nproc)" \
@@ -65,11 +66,18 @@ RUN cmake -S /tmp/ptdata/cpp -B /tmp/ptdata/build \
 # Fail the BUILD rather than the deployment. A typo in a -D option is ignored
 # by CMake with at most a warning, so a misspelled PTDATA_WITH_FDPIO would
 # silently produce a library that can reach the network; this is what catches
-# it. The six C ABI symbols are checked because a library that loads but
+# it.
+#
+# libcurl is in that list because it was missing from it, and something got
+# through: ptdata gained a libcurl-backed HTTP point provider that compiled
+# unconditionally, so an FDPIO=OFF build linked libcurl and carried a working
+# HTTP client while this check still passed. PTDATA_WITH_HTTP=OFF now gates the
+# provider (a no-op against 2.2.0, which predates it) and this asserts the
+# result rather than trusting the flag. The six C ABI symbols are checked because a library that loads but
 # exports nothing fails exactly like a data problem.
 RUN set -eux; \
     test -f /usr/local/ptdata/lib/libptd3d.so; \
-    ! readelf -d /usr/local/ptdata/lib/libptd3d.so | grep NEEDED | grep -qE 'libfdpio|libXrd'; \
+    ! readelf -d /usr/local/ptdata/lib/libptd3d.so | grep NEEDED | grep -qE 'libfdpio|libXrd|libcurl'; \
     for sym in ptdata_capi_size ptdata_capi_copy ptdata_capi_header_size \
                ptdata_capi_header_copy ptdata_capi_last_error ptdata_capi_reset; do \
         nm -D --defined-only /usr/local/ptdata/lib/libptd3d.so | grep -qw "$sym"; \
