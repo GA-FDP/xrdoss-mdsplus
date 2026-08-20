@@ -181,38 +181,74 @@ index paths are relative to:
 `LocalIoProvider::resolve()` returns its argument unchanged, so the literal URL
 string reaches `::open()` and succeeds. Verified in the sandbox.
 
+### Two ways to make those URLs open, and why the origin differs
+
+The sandbox's symlink chain is proven and costs no code, but it rests on one
+thing the sandbox controlled and we do not: **the working directory must be
+`/`**. The sandbox launches its own process and can `cd /`; here the handler is
+loaded into Pelican's `xrootd`, whose cwd is not ours to set and must not be
+changed underneath it. If that cwd is anything else, every lookup fails as
+"file not found" with nothing pointing at the cause.
+
+So the handler supplies its own `IoProvider` instead — a thin wrapper over
+`LocalIoProvider` that rewrites a configured URL prefix to a local root:
+
+```
+pelican://osg-htc.org:443/fdp-d3d/archives/ptdata/ptdatac/19887x/198873.PCE
+  ->  <archive-root>/ptdata/ptdatac/19887x/198873.PCE
+```
+
+**Rewrite in `open()` and `stat()`, not in `resolve()`.** `IoProvider::resolve`
+looks like the hook and is not: `ShotLocator` calls `io_provider->stat(path)`
+and hands the path to `ShotFile` directly, and nothing on this path calls
+`resolve` at all. Overriding only `resolve` would compile, do nothing, and fail
+exactly like a missing mount.
+
+This is the consumer half of the fix the sandbox spec defers ("the real fix is
+for the indexer to record archive-relative paths, with each consumer prepending
+its own root") and it needs no index regeneration. It also drops two of the
+sandbox's inherited caveats: no cwd dependency, and the federation host stops
+being encoded in a directory name — it becomes a configured string the operator
+can see and change.
+
+Keep the symlink chain in mind as the fallback: if the origin's cwd turns out
+to be `/` and the rewrite provider proves troublesome, the zero-code path still
+works.
+
+### Configuration comes from the exthandler line, not the environment
+
+The sandbox sets `PTDATA_JSON_INDEX_DIR` and friends as container environment
+variables because it owns the container. This handler is loaded into Pelican's
+origin, whose environment belongs to Pelican — but the config fragment is
+already ours, and the existing handler already takes `prefix`, `host`, `port`,
+`auth` and `authpath` that way. So:
+
+```
+http.exthandler mdsip /plugins/libXrdHttpMdsip.so \
+    prefix=/mdsip,host=<mdsip-host>,port=8000,auth=xrootd,authpath=/fdp-d3d/archives/mdsplus,\
+    pointprefix=/fdp-d3d/ptdata,pointauthpath=/fdp-d3d/archives/ptdata,\
+    pointindex=/ptdata-index,pointindexpattern=json_indexes_*,\
+    pointurlprefix=pelican://osg-htc.org:443/fdp-d3d/archives,pointroot=/fdp-archives
+```
+
+Omitting `pointprefix` leaves the point endpoint off entirely, so this ships
+dark and is turned on deliberately — and an origin that only wants the relay is
+unaffected.
+
+`JsonIndexPlugin::Config` takes an explicit `index_dir` and `IoProvider*`, so
+none of this needs an env var. `PTDATA_PTSERVERS=none` is still worth setting
+in the container as defence in depth, but the handler builds its `ShotLocator`
+with an empty `point_providers` vector regardless, so an index miss cannot
+become a socket attempt even if the environment says otherwise.
+
 ### What this costs the origin container
 
-Unlike the relay, which needed only the `.so` and a config fragment, this needs
-the same mount-and-symlink arrangement inside the **Pelican origin** container
-rather than in an image we build ourselves:
+Two read-only bind mounts, and no more:
 
 | Host | Container | Contents |
 |---|---|---|
-| `<archive>/ptdata` | `/fdp-archives/archives/ptdata` | shotfiles, ro |
+| `<archive>/ptdata` | `<pointroot>/ptdata` | shotfiles, ro |
 | `<archive>/index/json` | `/ptdata-index` | index snapshots, ro |
-
-plus the `/pelican:/osg-htc.org:443/fdp-d3d -> /fdp-archives` symlink chain,
-which a bind mount can supply.
-
-**The working directory must be `/`.** The sandbox hit this: a child inherits
-its parent's cwd, and the relative-path trick fails anywhere else. Whether
-XRootD's cwd is `/` in the origin container **must be checked before building
-on this**, and if it is not, the handler should `chdir` or resolve the index
-path itself rather than depend on it.
-
-Two further inherited caveats, both from the sandbox spec:
-
-- **The Pelican host and federation prefix are encoded in a directory name.**
-  If either changes, every lookup fails as "file not found" with nothing
-  pointing at the cause.
-- **Coverage equals the index's coverage.** A shot on disk but absent from the
-  snapshot is unavailable. This is the one real cost of index-first, and it
-  weakens — does not remove — the claim in the client spec that the endpoint
-  closes the index-staleness gap. It closes it for clients *without* an index;
-  the origin still sees what its own snapshot sees. The honest fix is the one
-  the sandbox spec already defers: have the indexer record archive-relative
-  paths, which would also retire the symlink chain.
 
 ### Reading the record
 
