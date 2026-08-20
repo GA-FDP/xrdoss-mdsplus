@@ -59,15 +59,31 @@ pause process.
 
 A second failure mode looks unrelated and is not: containers starting with an
 **empty rootfs**, so the first command in any image fails with
-`stat /bin/sh: no such file or directory` — including a bare
-`podman run almalinux:9 echo`. The images are fine; the runRoot and graphRoot
-have gone out of step, which is what happens when one of them is wiped
-underneath the other. `podman system migrate` does not clear it. `podman system
-reset` does, at the cost of every local image. To get work done without paying
-that, give podman a wholly separate state by overriding `HOME`,
-`XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `XDG_RUNTIME_DIR` together, with a
-`storage.conf` naming fresh `graphRoot`/`runRoot` paths — the existing store is
-then left untouched for a reset at a convenient moment. `tests/fed/fedbox.sh`, `scripts/mdsip-sandbox.sh` and
+`stat /bin/sh: no such file or directory`, or `exec: "echo": executable file
+not found in $PATH`, or `determining run uid: user: unknown user error looking
+up user "root"` — all the same thing, seen through whatever the image was
+asked to do first. A bare `podman run almalinux:9 echo` reproduces it.
+
+**Observed, on omega06:** the graph root keeps its layer *directories* and its
+metadata while the layer contents go missing. A store holding an 868 MB base
+image measured 76 MB with 29 layer directories still present, so podman
+believes the image is there and mounts nothing. It has happened overnight to
+two independent stores under `/local-scratch`, hours apart, with 295 GB free
+and no `tmpfiles.d` or `cron.daily` entry naming that path — **the cause is not
+established**, and the earlier guess here (runRoot and graphRoot going out of
+step) does not fit the evidence: it is the graph root's contents that vanish.
+
+What is established is the recovery. `podman system migrate` does not clear it.
+`podman system reset` does, at the cost of every local image. Either way the
+images must be pulled again, so treat container images on this host as
+**ephemeral** and make any build that depends on one able to re-pull
+(`podman build --pull=always`) rather than assuming a warm cache.
+
+To work without resetting someone else's store, give podman a wholly separate
+state by overriding `HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and
+`XDG_RUNTIME_DIR` together, with a `storage.conf` naming fresh
+`graphRoot`/`runRoot` paths. That isolates the blast radius; it does **not**
+prevent recurrence — the separate store was hit the next day too. `tests/fed/fedbox.sh`, `scripts/mdsip-sandbox.sh` and
 `tests/security/verify_sandbox.sh` set the latter automatically when
 `/run/user/$UID` is absent.
 
