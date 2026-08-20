@@ -61,8 +61,78 @@ RUN set -eux; \
     objdump -p libXrdOssMdsplus-5.so | grep NEEDED; \
     nm -D --defined-only libXrdOssMdsplus-5.so | grep -q XrdOssAddStorageSystem2
 
+# --- the HTTP relay, with the point endpoint --------------------------------
+#
+# Built here rather than shipped from the conda package, and the reason is
+# measurable: libptd3d is C++20, and compiled by the conda toolchain the
+# resulting plugin requires GLIBCXX_3.4.31 while this image tops out below
+# 3.4.30. The relay alone needs only 3.4.21, which is why it has been able to
+# ship from conda so far. Add ptdata and it stops loading.
+#
+# ptdata source arrives through the build context for the same reason as in
+# Containerfile.mdsip -- GA-FDP/ptdata is an INTERNAL repository, so an
+# anonymous fetch 404s and baking a token into a build argument would put it in
+# the image history. Produce it first:
+#
+#   scripts/fetch-ptdata-src.sh 2.2.0
+COPY ptdata-src.tar.gz /tmp/ptdata.tar.gz
+RUN mkdir -p /tmp/ptdata \
+ && tar -xzf /tmp/ptdata.tar.gz -C /tmp/ptdata --strip-components=1
+
+# Static, and incapable of remote I/O: the origin reads local files, and a
+# library that cannot reach the network cannot be turned into an egress path.
+# Static because the plugin is bind-mounted into the stock origin image, where
+# a runtime dependency on libptd3d.so would have to be mounted beside it and
+# kept version-matched.
+RUN cmake -S /tmp/ptdata/cpp -B /tmp/ptdata/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local/ptdata \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DPTDATA_WITH_FDPIO=OFF \
+        -DPTDATA_WITH_HTTP=OFF \
+        -DPTDATA_BUILD_STATIC=ON \
+        -DPTDATA_BUILD_PYTHON=OFF \
+        -DPTDATA_BUILD_TESTS=OFF \
+ && cmake --build /tmp/ptdata/build -j"$(nproc)" \
+ && cmake --install /tmp/ptdata/build
+
+RUN test -f /usr/local/ptdata/lib/libptd3d.a || { echo "no static libptd3d.a"; exit 1; }
+
+# Hand-compiled for the same reason as the Oss plugin above: CMakeLists.txt is
+# arranged for the conda dev environment and this image has a different layout.
+# The two point sources need C++20 (ptdata uses std::span and std::optional);
+# HttpRelay.cc stays at C++14 because PointStore.hh is a PIMPL that exposes no
+# ptdata type.
+RUN set -eux; \
+    for f in ArchiveIo PointStore; do \
+      g++ -std=c++20 -O2 -fPIC -c \
+          -I/src/src -I/usr/local/ptdata/include/ptd3d -I/usr/include/xrootd \
+          /src/src/$f.cc -o point_$f.o; \
+    done; \
+    g++ -std=c++14 -O2 -fPIC -c \
+        -I/src/src -I/usr/include/xrootd -I/usr/include/xrootd/private \
+        /src/src/MdsipSession.cc -o MdsipSession.o; \
+    g++ -std=c++14 -O2 -fPIC -c \
+        -I/src/src -I/usr/include/xrootd -I/usr/include/xrootd/private \
+        /src/src/HttpRelay.cc -o HttpRelay.o; \
+    g++ -shared -o libXrdHttpMdsip-5.so \
+        HttpRelay.o MdsipSession.o point_ArchiveIo.o point_PointStore.o \
+        /usr/local/ptdata/lib/libptd3d.a \
+        -lXrdUtils -lXrdHttpUtils
+
+# The assertions that matter, each guarding a failure that otherwise surfaces
+# only as "the origin will not start" or, worse, as missing data.
+RUN set -eux; \
+    ! objdump -p libXrdHttpMdsip-5.so | grep -E 'NEEDED.*(ptd3d|curl|fdpio|XrdCl)'; \
+    ! objdump -p libXrdHttpMdsip-5.so | grep -E 'NEEDED.*(Mds|Tdi|Tree)'; \
+    nm -D --defined-only libXrdHttpMdsip-5.so | grep -qw XrdHttpGetExtHandler; \
+    maxcxx=$(objdump -T libXrdHttpMdsip-5.so | grep -oE 'GLIBCXX_[0-9.]+' | sort -uV | tail -1); \
+    echo "max GLIBCXX required: $maxcxx"; \
+    strings /usr/lib64/libstdc++.so.6 | grep -qF "$maxcxx" \
+      || { echo "image libstdc++ does not provide $maxcxx"; exit 1; }
+
 VOLUME /out
 # The base image sets an ENTRYPOINT of its own; override it or our CMD would be
 # handed to pelican-server as arguments.
 ENTRYPOINT ["/bin/sh", "-c"]
-CMD ["cp /build/libXrdOssMdsplus-5.so /out/ && ls -l /out/libXrdOssMdsplus-5.so"]
+CMD ["cp /build/libXrdOssMdsplus-5.so /build/libXrdHttpMdsip-5.so /out/ && ls -l /out/"]
