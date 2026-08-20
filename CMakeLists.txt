@@ -76,6 +76,8 @@ if(NEED_CURL)
     find_package(CURL REQUIRED)
 endif()
 
+option(BUILD_POINT "Build the HTTP point endpoint (needs libptd3d)" OFF)
+
 # libptd3d, for the HTTP point endpoint. Built PTDATA_WITH_FDPIO=OFF and
 # PTDATA_WITH_HTTP=OFF so the library is physically incapable of remote I/O:
 # the origin reads local files, and a library that cannot reach the network
@@ -87,13 +89,38 @@ set(PTDATA_ROOT "" CACHE PATH "libptd3d install prefix")
 find_path(PTDATA_INCLUDE_DIR NAMES ptdata/shot_locator.h
     HINTS ${PTDATA_ROOT}/include/ptd3d $ENV{PTDATA_ROOT}/include/ptd3d
           ${CMAKE_PREFIX_PATH}/include/ptd3d)
-find_library(PTDATA_LIBRARY NAMES ptd3d
+# Prefer the static archive. The deployed plugin is compiled inside the Pelican
+# origin image and bind-mounted in, and it must be self-contained: a runtime
+# dependency on libptd3d.so would have to be mounted beside it and kept
+# version-matched. This is the same reason the MDSplus static archives are
+# linked in above. A shared library is accepted so a development tree without
+# -DPTDATA_BUILD_STATIC=ON still builds; the packaging assertion is what
+# enforces static for anything shipped.
+find_library(PTDATA_LIBRARY NAMES libptd3d.a ptd3d
     HINTS ${PTDATA_ROOT}/lib ${PTDATA_ROOT}/lib64 $ENV{PTDATA_ROOT}/lib
           ${CMAKE_PREFIX_PATH}/lib)
 
-if(PTDATA_INCLUDE_DIR AND PTDATA_LIBRARY)
+if(NOT BUILD_POINT)
+    # Opt-in, not auto-detected, because getting this wrong produces a plugin
+    # that builds and tests clean and then cannot be loaded at all.
+    # libptd3d is C++20; compiled by the conda toolchain it requires
+    # GLIBCXX_3.4.31, while the AlmaLinux 9 origin image tops out below 3.4.30.
+    # Measured: the relay alone needs 3.4.21, and linking conda-built ptd3d
+    # raises it to 3.4.31. So the point endpoint must be compiled in-image
+    # (Containerfile.build), and a conda build must not quietly acquire it just
+    # because ptdata happens to be installed.
+    set(HAVE_PTDATA FALSE)
+elseif(PTDATA_INCLUDE_DIR AND PTDATA_LIBRARY)
     set(HAVE_PTDATA TRUE)
     message(STATUS "Found libptd3d: ${PTDATA_LIBRARY}")
+    if(PTDATA_LIBRARY MATCHES "\\.a$")
+        message(STATUS "  static archive: the plugin will be self-contained")
+    else()
+        message(WARNING
+            "libptd3d is a shared library, so the plugin will carry a runtime "
+            "dependency on it. Fine for development; build ptdata with "
+            "-DPTDATA_BUILD_STATIC=ON for anything deployed.")
+    endif()
     add_library(pointcore OBJECT src/ArchiveIo.cc src/PointStore.cc)
     target_include_directories(pointcore PRIVATE src ${PTDATA_INCLUDE_DIR})
     # ptdata's headers need C++20 (std::span, std::optional). Raised only on
@@ -102,8 +129,10 @@ if(PTDATA_INCLUDE_DIR AND PTDATA_LIBRARY)
     # move.
     target_compile_features(pointcore PUBLIC cxx_std_20)
 else()
-    set(HAVE_PTDATA FALSE)
-    message(STATUS "libptd3d not found; the HTTP point endpoint will not be built")
+    message(FATAL_ERROR
+        "BUILD_POINT=ON but libptd3d was not found. Point -DPTDATA_ROOT at an "
+        "install built with -DPTDATA_BUILD_STATIC=ON -DPTDATA_WITH_FDPIO=OFF "
+        "-DPTDATA_WITH_HTTP=OFF, or leave BUILD_POINT off.")
 endif()
 
 if(BUILD_OSS OR BUILD_TESTS)
