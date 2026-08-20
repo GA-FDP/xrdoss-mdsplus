@@ -205,8 +205,13 @@ find_library(PTDATA_LIBRARY NAMES ptd3d
 if(PTDATA_INCLUDE_DIR AND PTDATA_LIBRARY)
     set(HAVE_PTDATA TRUE)
     message(STATUS "Found libptd3d: ${PTDATA_LIBRARY}")
-    add_library(pointcore OBJECT src/ArchiveIo.cc)
+    add_library(pointcore OBJECT src/ArchiveIo.cc src/PointStore.cc)
     target_include_directories(pointcore PRIVATE src ${PTDATA_INCLUDE_DIR})
+    # ptdata's headers need C++20 (std::span, std::optional). Raised only on
+    # these targets: the rest of the repo is C++14 for XRootD and MDSplus, and
+    # PointStore.hh deliberately exposes no ptdata type so nothing else has to
+    # move.
+    target_compile_features(pointcore PUBLIC cxx_std_20)
 else()
     set(HAVE_PTDATA FALSE)
     message(STATUS "libptd3d not found; the HTTP point endpoint will not be built")
@@ -225,7 +230,15 @@ if(BUILD_TESTS)
         target_include_directories(test_archiveio PRIVATE src ${PTDATA_INCLUDE_DIR}
                                    ${DOCTEST_INCLUDE_DIR})
         target_link_libraries(test_archiveio ${PTDATA_LIBRARY} pthread)
+        target_compile_features(test_archiveio PRIVATE cxx_std_20)
         add_test(NAME archiveio COMMAND test_archiveio)
+
+        add_executable(test_pointstore tests/test_pointstore.cpp $<TARGET_OBJECTS:pointcore>)
+        target_include_directories(test_pointstore PRIVATE src ${PTDATA_INCLUDE_DIR}
+                                   ${DOCTEST_INCLUDE_DIR})
+        target_link_libraries(test_pointstore ${PTDATA_LIBRARY} pthread)
+        target_compile_features(test_pointstore PRIVATE cxx_std_20)
+        add_test(NAME pointstore COMMAND test_pointstore)
     endif()
 
     foreach(t base64url tdipath treeversion resultcache)
