@@ -331,8 +331,8 @@ also means it consumes **no additional slot** and needs no second config line.
 http.exthandler mdsip /plugins/libXrdHttpMdsip.so \
     prefix=/mdsip,host=<mdsip-host>,port=8000,auth=xrootd,authpath=/fdp-d3d/archives/mdsplus,\
     pointprefix=/fdp-d3d/ptdata,pointauthpath=/fdp-d3d/archives/ptdata,\
-    pointindex=/ptdata-index,pointindexpattern=json_indexes_*,\
-    pointurlprefix=pelican://osg-htc.org:443/fdp-d3d/archives,pointroot=/fdp-archives
+    pointindex=/fdp-d3d/archives/index/json,pointindexpattern=json_indexes_*,\
+    pointurlprefix=pelican://osg-htc.org:443/fdp-d3d/archives,pointroot=/fdp-d3d/archives
 ```
 
 Omit `pointprefix` and the endpoint does not exist — the relay behaves exactly
@@ -359,12 +359,27 @@ for every point, which reads as missing data rather than as a mistake.
   that is not available here, because the handler is loaded into Pelican's
   `xrootd` and its cwd is not ours to set.
 
-### Two more read-only bind mounts
+### No new bind mounts are needed
 
-| Host | Container | Contents |
-|---|---|---|
-| `<archive>/ptdata` | `<pointroot>/ptdata` | shot files |
-| `<archive>/index/json` | `/ptdata-index` | index snapshots |
+An earlier revision of this section called for two. That was wrong, and the
+truth is better: the origin already mounts the whole archive root
+(`-v /mnt/beegfs/data:/fdp-d3d/`, see `d3d-origin-state.md`), so both paths the
+point endpoint needs are already inside the container:
+
+| what | path in the container |
+|---|---|
+| shot files | `/fdp-d3d/archives/ptdata/...` |
+| index snapshots | `/fdp-d3d/archives/index/json/...` |
+
+Better still, that mount point matches the federation prefix, so a path inside
+the container is the same string as a `pelican://` URL with the host stripped —
+which makes the rewrite very nearly an identity. It is still worth doing rather
+than relying on the coincidence: it keeps the federation host out of a path and
+survives the archive being mounted elsewhere later.
+
+Note that mount is **read-write**, because the origin writes to the archive.
+The point endpoint only reads, and libptd3d is built incapable of remote I/O,
+but nothing in this design gives the plugin a read-only view.
 
 Resolution is **index-only**: no `SYS_D3` scan and no ptserver tier exist in
 this path at all, so an index miss is absent data and can never become a socket

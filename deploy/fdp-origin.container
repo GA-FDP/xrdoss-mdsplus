@@ -1,0 +1,79 @@
+# The Pelican origin, running GA's derived image.
+#
+# Install to /etc/containers/systemd/ (ROOTFUL -- the origin runs as root
+# today, see docs/d3d-origin-state.md), then:
+#   systemctl daemon-reload && systemctl start fdp-origin
+#
+# Deploying is a change to the Image= line below; rolling back is putting the
+# previous tag back, since the old image is still in the registry and no moving
+# :latest tag is published.
+#
+# --- WHY THIS FILE EXISTS ---------------------------------------------------
+#
+# Until now the origin was started by a one-off `podman run --restart always`
+# that lived only as a transcript in d3d-origin-admin's docs/d3d-origin-state.md,
+# and install-relay.sh took care never to touch it: plugins were copied into the
+# bind-mounted config dir, so the container never had to be recreated.
+#
+# The derived image ends that. An image cannot be swapped under a running
+# container, so the launch has to change anyway -- and if it must change, it
+# should be a reviewable artifact rather than a command someone once ran.
+#
+# A quadlet rather than `podman kube play`: this is one container, so a Pod spec
+# would add an infra container and pod semantics for nothing, it would be
+# inconsistent with deploy/fdp-mdsip.container next door, and a Pod spec cannot
+# express several podman options (--pids-limit among them, see
+# docs/deployment-notes.md).
+#
+# --- VERIFY BEFORE FIRST USE ------------------------------------------------
+#
+# Every Volume=, PublishPort= and Exec= below is transcribed from
+# d3d-origin-state.md, which is an OBSERVATION of the running container at one
+# point in time, not a definition of it. Confirm against the live container --
+#   sudo podman inspect pelican-origin
+# -- before starting this unit. A missing mount here is an origin that comes up
+# and serves nothing.
+[Unit]
+Description=FDP Pelican origin (GA-derived image, MDSplus and PTData plugins)
+Documentation=https://github.com/GA-FDP/xrdoss-mdsplus/blob/main/docs/deployment-notes.md
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+# Pelican 7.26.0 + the two plugins at /plugins. Note this is an upgrade from
+# the v7.23.3 recorded in d3d-origin-state.md, so a first cutover changes both
+# Pelican and the plugins at once. 7.26.0 also carries the fix for short-lived
+# `fdp login` tokens, and its XRootD is v5.9.2 -- the same version the plugins
+# are built against, retiring the 5.9.1/5.9.2 mismatch that was tolerated.
+Image=ghcr.io/ga-fdp/fdp-origin:7.26.0-fdp2.3.0
+ContainerName=pelican-origin
+
+# 8000 as well as 8443: the origin holds both, which is why the mdsip sandbox
+# cannot use its default port and publishes on 8100 instead.
+PublishPort=8000:8000
+PublishPort=8443:8443
+
+Volume=/var/pelican/config/scitoken:/var/run/stash-origin-auth/
+Volume=/data/pelican/logs:/logs
+Volume=/var/pelican/jwks:/etc/pelican/jwks
+Volume=/var/pelican/certs:/etc/pelican/cert-orig/
+# The whole archive root, read-write: the origin writes here. Note the mount
+# point matches the federation prefix, so a path inside the container is the
+# same string as the path in a pelican:// URL after the host is stripped --
+# which is what makes the point endpoint's pointurlprefix/pointroot rewrite
+# almost an identity. See docs/deployment-notes.md.
+Volume=/mnt/beegfs/data:/fdp-d3d/
+# The whole config dir is a bind mount, so xrootd.cfg and pelican.yaml are
+# edited on the host without rebuilding or recreating anything.
+Volume=/var/pelican/config:/etc/pelican
+Volume=/var/pelican/shoveler:/etc/pelican/shoveler
+
+# Federated with the PRODUCTION OSDF director, not a test one.
+Exec=serve -f https://osdf-director.osg-htc.org
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
