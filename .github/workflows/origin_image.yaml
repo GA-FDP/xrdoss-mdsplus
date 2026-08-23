@@ -1,0 +1,130 @@
+# Build the Pelican-derived origin image and publish it to GHCR.
+#
+# Why the image is built here rather than on the deploy host: the plugins link
+# libptd3d, which is C++20. Compiled by the conda toolchain they require
+# GLIBCXX_3.4.31, while the AlmaLinux 9 origin image provides 3.4.29 -- so a
+# plugin built anywhere but inside this base cannot be loaded by it. Building
+# in the base makes the ABI correct by construction.
+#
+# Design: docs/superpowers/specs/2026-08-23-derived-origin-image-design.md
+name: Origin image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'image-*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to publish (e.g. 7.26.0-fdp2.3.0)'
+        required: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ${{ github.repository_owner }}/fdp-origin
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write        # GITHUB_TOKEN can push to GHCR in this org; no PAT needed
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Read the version from the Containerfile rather than repeating it. It
+      # was pinned in five places once; that is how they drift.
+      - name: Read PTDATA_VERSION from the Containerfile
+        run: |
+          v=$(sed -n 's/^ARG PTDATA_VERSION=//p' Containerfile.origin | head -1)
+          [ -n "$v" ] || { echo "::error::no ARG PTDATA_VERSION in Containerfile.origin"; exit 1; }
+          echo "PTDATA_VERSION=$v" >> "$GITHUB_ENV"
+          echo "ptdata $v"
+
+      # ptdata is an INTERNAL repository, so the default GITHUB_TOKEN cannot
+      # read it -- that token is scoped to this repo alone. PTDATA_SRC_TOKEN is
+      # a read-only PAT (contents: read on GA-FDP/ptdata). This is the one
+      # credential this pipeline needs that the platform does not provide.
+      - name: Check out ptdata at the pinned release
+        uses: actions/checkout@v4
+        with:
+          repository: GA-FDP/ptdata
+          ref: release-${{ env.PTDATA_VERSION }}
+          token: ${{ secrets.PTDATA_SRC_TOKEN }}
+          path: .ptdata-src
+          fetch-depth: 0
+
+      # scripts/fetch-ptdata-src.sh prefers a local checkout and uses
+      # `git archive`, which is what embeds the export-subst tag the
+      # Containerfile asserts against. Point it at the checkout above rather
+      # than letting it clone over SSH, which a runner cannot do.
+      - name: Stage the ptdata source tarball
+        run: PTDATA_CHECKOUT="$PWD/.ptdata-src" ./scripts/fetch-ptdata-src.sh
+
+      - name: Work out the tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "tag=${GITHUB_REF_NAME#image-}" >> "$GITHUB_OUTPUT"
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "tag=main-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            # A pull request builds and validates but must not publish.
+            echo "tag=pr-${{ github.event.number }}" >> "$GITHUB_OUTPUT"
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # podman, not docker: the image was developed and verified with podman,
+      # and the assertions inside the Containerfile are what gate a release.
+      # Keeping the same builder keeps "it worked locally" meaningful.
+      - name: Build
+        run: |
+          podman build -f Containerfile.origin \
+            -t "${REGISTRY}/${IMAGE}:${{ steps.meta.outputs.tag }}" .
+
+      # The contract suite is the acceptance test: start the built image and
+      # ask it for a point record, exactly as a client would. Without shot
+      # data on the runner this can only check that the handler loads, which
+      # is still the failure that a config or ABI mistake produces.
+      - name: The handler must load in the built image
+        run: |
+          cfg=$(mktemp)
+          sed 's#/build/libXrdHttpMdsip.so#/plugins/libXrdHttpMdsip.so#' \
+              tests/integration/point-endpoint.cfg > "$cfg"
+          podman run -d --name probe -p 127.0.0.1:8080:8080 --user 1000 \
+            -v "$cfg:/etc/xrootd/point.cfg:ro" \
+            --entrypoint '["xrootd","-c","/etc/xrootd/point.cfg"]' \
+            "${REGISTRY}/${IMAGE}:${{ steps.meta.outputs.tag }}"
+          for _ in $(seq 1 30); do
+            podman logs probe 2>&1 | grep -q "point endpoint" && break
+            sleep 1
+          done
+          podman logs probe 2>&1 | tail -20
+          podman logs probe 2>&1 | grep -q "XrdHttpMdsip point endpoint" \
+            || { echo "::error::the point endpoint did not load"; exit 1; }
+          podman rm -f probe
+
+      - name: Log in to GHCR
+        if: steps.meta.outputs.push == 'true'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | podman login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+
+      - name: Push
+        if: steps.meta.outputs.push == 'true'
+        run: |
+          podman push "${REGISTRY}/${IMAGE}:${{ steps.meta.outputs.tag }}"
+          # A moving :latest is deliberately NOT published. The origin pins an
+          # explicit tag so "what is deployed" is answerable, and a rollback is
+          # a tag change rather than an archaeology exercise.
