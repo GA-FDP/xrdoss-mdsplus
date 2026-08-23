@@ -114,11 +114,14 @@ jobs:
       # is still the failure that a config or ABI mistake produces.
       - name: The handler must load in the built image
         run: |
-          cfg=$(mktemp)
-          sed 's#/build/libXrdHttpMdsip.so#/plugins/libXrdHttpMdsip.so#' \
-              tests/integration/point-endpoint.cfg > "$cfg"
+          # Mount the repo's config directly. Writing it to mktemp gives a
+          # 0600 file owned by the runner, and with --user 1000 the process
+          # inside the container maps to a different host uid and cannot read
+          # it -- xrootd then fails with "permission denied" on its config,
+          # which looks like a plugin problem and is not. The committed config
+          # already names /plugins, so there is nothing to rewrite.
           podman run -d --name probe -p 127.0.0.1:8080:8080 --user 1000 \
-            -v "$cfg:/etc/xrootd/point.cfg:ro" \
+            -v "$PWD/tests/integration/point-endpoint.cfg:/etc/xrootd/point.cfg:ro" \
             --entrypoint '["xrootd","-c","/etc/xrootd/point.cfg"]' \
             "${REGISTRY}/${IMAGE}:${{ steps.meta.outputs.tag }}"
           for _ in $(seq 1 30); do
