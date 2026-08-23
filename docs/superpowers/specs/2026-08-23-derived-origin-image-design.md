@@ -93,8 +93,18 @@ reviewable change to one line.
 
 ## Registry and access
 
-**GHCR, private packages under the GA-FDP organisation**, with a
-`read:packages` token on the origin.
+**GHCR, public packages under the GA-FDP organisation**, pulled anonymously.
+
+Public was chosen over private-plus-a-token once the sandbox image had to be
+public anyway: the `fdp-mdsip` service account pulls its own image and is
+deliberately given no GitHub access, so a private package there would have
+meant putting a registry credential on exactly the account the constraint
+exists to keep credential-free. Both images carry the same `libptd3d` binary,
+so making one public and the other private would protect nothing while adding
+a credential to rotate, an auth file to keep off a runtime directory that is
+wiped on reboot, and a token to expire at an inconvenient moment.
+
+The result is that **the origin holds no registry credential at all**.
 
 Verified rather than assumed — from `d3d-origin.gat.com` itself:
 
@@ -115,15 +125,23 @@ serves manifests and redirects, while layers come from
 `github.com` yields a pull that authenticates, starts, and stalls on the first
 blob — so that host must be tested explicitly, and is.
 
-A `read:packages` token is strictly narrower than what the pipeline needs
-today, which is SSH clone access to two repositories including an internal
-one. This satisfies the standing constraint that the mdsip service account not
-be given GitHub access, rather than working around it.
+This satisfies the standing constraint that the mdsip service account not be
+given GitHub access by removing the credential entirely, rather than narrowing
+it. Today's pipeline needs SSH clone access to two repositories, one of them
+internal, on the deploy host; afterwards the deploy host needs nothing. The one
+credential that remains anywhere is `PTDATA_SRC_TOKEN` in CI, which reads the
+internal ptdata source at a pinned release.
+
+Note what is and is not exposed. The published images contain compiled
+binaries, not source: libptd3d built from the internal repository, the MDSplus
+runtime from upstream's public RPMs, and the sandbox's own scripts. Nothing in
+them is a credential, and the archive they read is mounted at run time rather
+than baked in.
 
 Size is not a constraint: GHCR limits individual layers (~10 GB), not images,
-and GA-FDP is on an Enterprise plan, where private package storage and transfer
-draw on a large allowance with billable overage rather than a hard cap. Worth
-confirming against current billing, since those figures move.
+and **public packages have free, unlimited storage and bandwidth** — so the
+~900 MB origin image costs nothing and the private-package quota question that
+would otherwise apply does not arise.
 
 ## What CI must prove before publishing
 
