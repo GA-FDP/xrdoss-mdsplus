@@ -22,7 +22,15 @@ Documentation=https://github.com/GA-FDP/xrdoss-mdsplus/blob/main/docs/security.m
 After=network-online.target
 
 [Container]
-Image=localhost/fdp-mdsip:latest
+# Pulled from GHCR by the fdp-mdsip account itself, which is why the package
+# is published public: a private one would need registry credentials on the
+# service account, and that account is deliberately given no GitHub access.
+# If it is ever made private, add a `podman login ghcr.io` for that user and
+# nothing else here changes.
+#
+# Pinned, not :latest -- what is deployed stays answerable, and a rollback is
+# putting the previous tag back.
+Image=ghcr.io/ga-fdp/fdp-mdsip:2.3.0
 ContainerName=fdp-mdsip
 
 # Create with: podman network create --internal fdp-mdsip-net
