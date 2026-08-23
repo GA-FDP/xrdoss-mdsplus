@@ -45,6 +45,12 @@ Wants=network-online.target
 # Pelican and the plugins at once. 7.26.0 also carries the fix for short-lived
 # `fdp login` tokens, and its XRootD is v5.9.2 -- the same version the plugins
 # are built against, retiring the 5.9.1/5.9.2 mismatch that was tolerated.
+# Public package, pulled anonymously: the origin holds no registry credential.
+# Both images are public because the sandbox's had to be -- the fdp-mdsip
+# account pulls its own and is given no GitHub access -- and they carry the
+# same libptd3d binary, so splitting visibility would protect nothing while
+# adding a token to rotate and an auth file to keep off a runtime directory
+# that a reboot wipes.
 Image=ghcr.io/ga-fdp/fdp-origin:7.26.0-fdp2.3.0
 ContainerName=pelican-origin
 
