@@ -440,3 +440,54 @@ GA-FDP/ptdata makes against its stub.
 in one and missing from another is exactly the failure that arrangement exists
 to prevent, and the point endpoint adds six parameters and two mounts to keep in
 step.
+
+## Launching the origin: `podman kube play`, and why not compose
+
+`deploy/kube/fdp-origin.yaml` describes the origin declaratively;
+`deploy/fdp-origin.kube` is a quadlet unit so systemd supervises it. Deploying
+becomes a change to one `image:` line, and rolling back is putting the previous
+tag back — the old image is still in the registry.
+
+**Compose was considered and is not available here.** On d3d-origin, `docker`
+is the podman-docker emulation shim, `docker-compose` is absent, and
+`podman compose` reports "looking up compose provider failed". Adopting compose
+would mean installing a provider on the origin to gain convenience, whereas
+`podman kube play` is already present and gives the same single declarative
+file, with systemd supervision through a `.kube` unit.
+
+### The mdsip sandbox stays a quadlet
+
+Only the origin moves. `deploy/fdp-mdsip.container` keeps the sandbox, for two
+reasons that are worth stating so nobody "finishes the job" later.
+
+**Its isolation is a host-account boundary, not a container UID.** The sandbox
+runs under rootless podman as the `fdp-mdsip` account with its own subuid range
+(`/etc/subuid: fdp-mdsip:755360:65536`), so container-root maps to an
+unprivileged host uid shared with nothing else. A `user:` field — in compose or
+in a pod spec — sets the UID *inside* the container and does not reproduce
+that. Keeping the two under separate accounts is what preserves it, and that
+means separate invocations either way, so a single file buys nothing.
+
+**Kubernetes YAML cannot express all of its hardening.** Measured against
+podman 5.4.0 on the origin, which has `memory pids` cgroup delegation:
+
+| quadlet setting | expressible in a pod spec? |
+|---|---|
+| `ReadOnly=true` | yes — `securityContext.readOnlyRootFilesystem` |
+| `DropCapability=ALL` | yes — `securityContext.capabilities.drop: [ALL]` |
+| `NoNewPrivileges=true` | yes — `allowPrivilegeEscalation: false` |
+| `SeccompProfile=` | yes — `securityContext.seccompProfile` |
+| `--memory=8g` | yes — `resources.limits.memory` (verified: 512Mi → 536870912) |
+| **`--pids-limit=512`** | **no Kubernetes field** |
+| **`--dns=none`** | only approximately, via `dnsConfig` |
+
+A fork bomb inside the sandbox is precisely the threat `--pids-limit` answers,
+and the sandbox's premise is that a client already has code execution inside
+it. Trading that for uniformity would be a poor bargain.
+
+Note when testing hardening locally: **a host without delegated cgroup
+controllers silently ignores memory and pids limits**, whether they come from
+`kube play` or from `podman run`. On omega, `podman run --memory=512m` yields
+`Memory: 0`; the same YAML on the origin yields the real value. Check
+`/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers`
+before concluding a limit was dropped by the tool.

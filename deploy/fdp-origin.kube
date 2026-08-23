@@ -1,0 +1,28 @@
+# Quadlet unit: systemd supervises `podman kube play` for the origin.
+#
+# Install to /etc/containers/systemd/ (rootful) and:
+#   systemctl daemon-reload && systemctl start fdp-origin
+#
+# Chosen over compose because no compose provider is installed on the origin --
+# `docker` there is the podman-docker shim and `podman compose` reports no
+# provider -- so compose would mean adding a dependency to gain convenience,
+# while kube play is already present.
+[Unit]
+Description=FDP Pelican origin (GA-derived image with the MDSplus and PTData plugins)
+Documentation=https://github.com/GA-FDP/xrdoss-mdsplus/blob/main/docs/deployment-notes.md
+After=network-online.target
+Wants=network-online.target
+
+[Kube]
+Yaml=/etc/containers/systemd/fdp-origin.yaml
+# Pull only when the tag is absent locally: tags are immutable by convention
+# here (no moving :latest is published), so re-pulling buys nothing and would
+# make a restart depend on the registry being reachable.
+PublishPort=8443:8443
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
