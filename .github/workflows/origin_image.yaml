@@ -26,7 +26,9 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: ${{ github.repository_owner }}/fdp-origin
+  # GHCR repository names must be lowercase, and the org is 'GA-FDP',
+  # so this cannot be github.repository_owner verbatim.
+  IMAGE: ga-fdp/fdp-origin
 
 jobs:
   build:
@@ -46,6 +48,19 @@ jobs:
           [ -n "$v" ] || { echo "::error::no ARG PTDATA_VERSION in Containerfile.origin"; exit 1; }
           echo "PTDATA_VERSION=$v" >> "$GITHUB_ENV"
           echo "ptdata $v"
+
+      # actions/checkout fails a missing token with "Input required and not
+      # supplied: token", which names neither the secret nor the fix. Say it
+      # here instead.
+      - name: Require the ptdata source token
+        run: |
+          if [ -z "${{ secrets.PTDATA_SRC_TOKEN }}" ]; then
+            echo "::error::PTDATA_SRC_TOKEN is not set. It is a read-only PAT with"\
+                 "contents:read on GA-FDP/ptdata, needed because that repository is"\
+                 "internal and the built-in GITHUB_TOKEN is scoped to this one."\
+                 "Add it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
 
       # ptdata is an INTERNAL repository, so the default GITHUB_TOKEN cannot
       # read it -- that token is scoped to this repo alone. PTDATA_SRC_TOKEN is
