@@ -27,7 +27,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Keep in step with ARG PTDATA_VERSION in Containerfile.mdsip and
-# Containerfile.build. Passed to the
+# Containerfile.origin. Passed to the
 # build as --build-arg so the two cannot silently disagree; see the README.
 VERSION="${1:-${PTDATA_VERSION:-2.3.0}}"
 TAG="release-${VERSION}"

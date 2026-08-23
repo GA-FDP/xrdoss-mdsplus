@@ -382,7 +382,7 @@ Not a preference — measured:
 
 AlmaLinux 9 provides up to `GLIBCXX_3.4.29`. The relay alone needs only
 `3.4.21`, which is why it has shipped from conda; libptd3d is C++20 and moves
-the floor past what the image has. `Containerfile.build` builds it in-image and
+the floor past what the image has. `Containerfile.origin` builds it in-image and
 asserts the result, and the CMake option is opt-in (`BUILD_POINT=ON`) so a conda
 build cannot quietly acquire an unloadable plugin.
 

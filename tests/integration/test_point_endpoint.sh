@@ -9,7 +9,7 @@
 #
 #   tests/integration/test_point_endpoint.sh
 #
-# Requires: podman, an xrdoss-mdsplus-build image (see Containerfile.build), a
+# Requires: podman, an fdp-origin image (see Containerfile.origin), a
 # ptdata checkout with the http_endpoint client, and the shot cache.
 set -euo pipefail
 

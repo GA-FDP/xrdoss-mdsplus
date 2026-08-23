@@ -16,7 +16,19 @@
 # (mdsplus-devel_bin is 19 files, all .a), so the headers are vendored from
 # upstream source -- see third_party/mdsplus/README.md.
 
-FROM hub.opensciencegrid.org/pelican_platform/origin:latest
+# Pinned by DIGEST, not by tag. With :latest the same image tag builds
+# differently on different days and "which Pelican is in production" stops
+# being answerable; rebasing is then a deliberate one-line change that runs the
+# whole validation suite. This digest is Pelican 7.26.0 (XRootD v5.9.2,
+# libstdc++ ceiling GLIBCXX_3.4.29).
+#
+# 7.26.0 also carries the fix for short-lived `fdp login` tokens, so the first
+# deploy of this image is simultaneously a Pelican upgrade from the 7.23.3
+# currently in production -- worth remembering if anything misbehaves at
+# cutover, since there are then two candidate causes.
+ARG PELICAN_BASE=hub.opensciencegrid.org/pelican_platform/origin@sha256:7b0c9b88f0e54585959be732f683a79ee4e3175ca8b4b9b37d5a45c4e9ebae30
+
+FROM ${PELICAN_BASE} AS build
 
 ARG MDSPLUS_VERSION=7.158-2
 ARG MDSPLUS_REPO=http://www.mdsplus.org/dist/rhel9/stable/RPMS/x86_64
@@ -36,7 +48,7 @@ RUN for a in libMdsIpShr libMdsShr libTdiShr libTreeShr; do \
 
 COPY src /src/src
 COPY third_party /src/third_party
-COPY Containerfile.build /src/
+COPY Containerfile.origin /src/
 
 WORKDIR /build
 
@@ -133,13 +145,45 @@ RUN set -eux; \
     ! objdump -p libXrdHttpMdsip-5.so | grep -E 'NEEDED.*(ptd3d|curl|fdpio|XrdCl)'; \
     ! objdump -p libXrdHttpMdsip-5.so | grep -E 'NEEDED.*(Mds|Tdi|Tree)'; \
     nm -D --defined-only libXrdHttpMdsip-5.so | grep -qw XrdHttpGetExtHandler; \
-    maxcxx=$(objdump -T libXrdHttpMdsip-5.so | grep -oE 'GLIBCXX_[0-9.]+' | sort -uV | tail -1); \
-    echo "max GLIBCXX required: $maxcxx"; \
+    maxcxx=$(objdump -T libXrdHttpMdsip-5.so libXrdOssMdsplus-5.so | grep -oE 'GLIBCXX_[0-9.]+' | sort -uV | tail -1); \
+    echo "max GLIBCXX required by the plugins: $maxcxx"; \
     strings /usr/lib64/libstdc++.so.6 | grep -qF "$maxcxx" \
       || { echo "image libstdc++ does not provide $maxcxx"; exit 1; }
 
+# `--target build` still yields the artifact extractor, for anyone who wants the
+# bare .so files rather than the image.
 VOLUME /out
 # The base image sets an ENTRYPOINT of its own; override it or our CMD would be
 # handed to pelican-server as arguments.
 ENTRYPOINT ["/bin/sh", "-c"]
 CMD ["cp /build/libXrdOssMdsplus-5.so /build/libXrdHttpMdsip-5.so /out/ && ls -l /out/"]
+
+# --- the shipped image ------------------------------------------------------
+#
+# A fresh stage from the SAME pinned base, so it inherits Pelican's own
+# entrypoint and runs as an origin. Only the plugins are added; all
+# configuration stays outside the image, because hostnames, archive paths and
+# authpaths are site-specific and baking them in would force a rebuild for a
+# config change.
+FROM ${PELICAN_BASE}
+
+COPY --from=build /build/libXrdOssMdsplus-5.so /plugins/libXrdOssMdsplus-5.so
+COPY --from=build /build/libXrdHttpMdsip-5.so  /plugins/libXrdHttpMdsip-5.so
+
+LABEL org.opencontainers.image.source="https://github.com/GA-FDP/xrdoss-mdsplus" \
+      org.opencontainers.image.description="Pelican origin with the GA-FDP MDSplus OSS plugin and the mdsip relay / PTData point endpoint" \
+      org.fdp.pelican.base="${PELICAN_BASE}"
+
+# The config references the UNSUFFIXED name: XrdOucPinLoader appends the plugin
+# version itself, so naming libXrdHttpMdsip-5.so in xrootd.cfg would have it
+# look for libXrdHttpMdsip-5-5.so.
+# Flat, not a loop: a multi-line `for` inside RUN alongside backtick-comments
+# is a shell-syntax hazard that fails as exit 2 with no message. The ABI check
+# proper lives in the build stage, which is the same base and therefore the
+# same libstdc++; this stage just proves the artifacts arrived intact.
+RUN set -eux; \
+    test -f /plugins/libXrdOssMdsplus-5.so; \
+    test -f /plugins/libXrdHttpMdsip-5.so; \
+    nm -D --defined-only /plugins/libXrdHttpMdsip-5.so | grep -qw XrdHttpGetExtHandler; \
+    nm -D --defined-only /plugins/libXrdOssMdsplus-5.so | grep -qw XrdOssAddStorageSystem2; \
+    ! objdump -p /plugins/libXrdHttpMdsip-5.so | grep -E 'NEEDED.*(ptd3d|curl|fdpio|XrdCl|Mds|Tdi|Tree)'
