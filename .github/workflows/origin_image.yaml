@@ -28,7 +28,7 @@ env:
   REGISTRY: ghcr.io
   # GHCR repository names must be lowercase, and the org is 'GA-FDP',
   # so this cannot be github.repository_owner verbatim.
-  IMAGE: ga-fdp/fdp-origin
+  OWNER: ga-fdp
 
 jobs:
   build:
@@ -36,6 +36,24 @@ jobs:
     permissions:
       contents: read
       packages: write        # GITHUB_TOKEN can push to GHCR in this org; no PAT needed
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The Pelican origin plus both plugins. Its plugins must be compiled
+          # in this exact base -- see the ABI note at the top of this file.
+          - name: origin
+            containerfile: Containerfile.origin
+            image: fdp-origin
+            runtime_check: true
+          # The mdsip sandbox. Built FROM almalinux:9, so it carries no
+          # ABI-to-origin constraint; its acceptance lives inside the
+          # Containerfile, which asserts fork/nofork, `cd /`, the absence of
+          # `mdsip -m`, and that libptd3d links no curl/fdpio/XrdCl.
+          - name: mdsip
+            containerfile: Containerfile.mdsip
+            image: fdp-mdsip
+            runtime_check: false
 
     steps:
       - uses: actions/checkout@v4
@@ -103,16 +121,17 @@ jobs:
       # podman, not docker: the image was developed and verified with podman,
       # and the assertions inside the Containerfile are what gate a release.
       # Keeping the same builder keeps "it worked locally" meaningful.
-      - name: Build
+      - name: Build ${{ matrix.name }}
         run: |
-          podman build -f Containerfile.origin \
-            -t "${REGISTRY}/${IMAGE}:${{ steps.meta.outputs.tag }}" .
+          podman build -f ${{ matrix.containerfile }} \
+            -t "${REGISTRY}/${OWNER}/${{ matrix.image }}:${{ steps.meta.outputs.tag }}" .
 
       # The contract suite is the acceptance test: start the built image and
       # ask it for a point record, exactly as a client would. Without shot
       # data on the runner this can only check that the handler loads, which
       # is still the failure that a config or ABI mistake produces.
       - name: The handler must load in the built image
+        if: matrix.runtime_check
         run: |
           # Mount the repo's config directly. Writing it to mktemp gives a
           # 0600 file owned by the runner, and with --user 1000 the process
@@ -123,7 +142,7 @@ jobs:
           podman run -d --name probe -p 127.0.0.1:8080:8080 --user 1000 \
             -v "$PWD/tests/integration/point-endpoint.cfg:/etc/xrootd/point.cfg:ro" \
             --entrypoint '["xrootd","-c","/etc/xrootd/point.cfg"]' \
-            "${REGISTRY}/${IMAGE}:${{ steps.meta.outputs.tag }}"
+            "${REGISTRY}/${OWNER}/${{ matrix.image }}:${{ steps.meta.outputs.tag }}"
           for _ in $(seq 1 30); do
             podman logs probe 2>&1 | grep -q "point endpoint" && break
             sleep 1
@@ -142,7 +161,7 @@ jobs:
       - name: Push
         if: steps.meta.outputs.push == 'true'
         run: |
-          podman push "${REGISTRY}/${IMAGE}:${{ steps.meta.outputs.tag }}"
+          podman push "${REGISTRY}/${OWNER}/${{ matrix.image }}:${{ steps.meta.outputs.tag }}"
           # A moving :latest is deliberately NOT published. The origin pins an
           # explicit tag so "what is deployed" is answerable, and a rollback is
           # a tag change rather than an archaeology exercise.
