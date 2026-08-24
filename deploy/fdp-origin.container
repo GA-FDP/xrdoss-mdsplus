@@ -25,14 +25,21 @@
 # express several podman options (--pids-limit among them, see
 # docs/deployment-notes.md).
 #
-# --- VERIFY BEFORE FIRST USE ------------------------------------------------
+# --- VERIFIED AGAINST THE LIVE CONTAINER (2026-08-24) -----------------------
 #
-# Every Volume=, PublishPort= and Exec= below is transcribed from
-# d3d-origin-state.md, which is an OBSERVATION of the running container at one
-# point in time, not a definition of it. Confirm against the live container --
-#   sudo podman inspect pelican-origin
-# -- before starting this unit. A missing mount here is an origin that comes up
-# and serves nothing.
+# This file began as a transcription of d3d-origin-state.md, which is an
+# OBSERVATION of the running container, not a definition of it. It has since
+# been checked against `podman inspect pelican-origin` on d3d-origin: all seven
+# Volume= lines, both PublishPort= lines, Exec=, Restart=always, root user and
+# the bridge network match what is running.
+#
+# Two things that check did turn up, both handled below: the rlimits (see
+# Ulimit=) and PidsLimit=. Re-check after any change to the running container.
+#
+# What does NOT need expressing here: the live container shows `nosuid` on the
+# /fdp-d3d/ mount. That is not an option someone passed -- /mnt/beegfs is itself
+# mounted nosuid on the host and podman propagates host mount flags to bind
+# mounts, so this unit inherits it too. Do not add it.
 [Unit]
 Description=FDP Pelican origin (GA-derived image, MDSplus and PTData plugins)
 Documentation=https://github.com/GA-FDP/xrdoss-mdsplus/blob/main/docs/deployment-notes.md
@@ -76,6 +83,26 @@ Volume=/var/pelican/shoveler:/etc/pelican/shoveler
 
 # Federated with the PRODUCTION OSDF director, not a test one.
 Exec=serve -f https://osdf-director.osg-htc.org
+
+# The running origin has these limits IN EFFECT (read from /proc/<pid>/limits,
+# not merely from its config), and they are not what a systemd-started
+# container would get:
+#
+#   live container      nofile 1048576/1048576   nproc 4194304/4194304
+#   systemd defaults    nofile    1024/ 524288   nproc  765887/ 765887
+#
+# Whatever shell ran the original `podman run` had them raised. Inheriting the
+# systemd defaults instead would cut the SOFT open-file limit by a factor of a
+# thousand on a process whose job is holding many concurrent connections and
+# open archive files -- a failure that appears under load, long after a cutover
+# looks successful. So state them rather than inherit them.
+Ulimit=nofile=1048576:1048576
+Ulimit=nproc=4194304:4194304
+
+# 2048 is podman's own default and matches the live container. Stated because a
+# limit that matters should not be a silent default, and because it is one of
+# the options a Pod spec cannot express -- part of why this is a quadlet.
+PidsLimit=2048
 
 [Service]
 Restart=always
