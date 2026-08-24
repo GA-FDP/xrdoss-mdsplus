@@ -27,6 +27,12 @@
 # currently in production -- worth remembering if anything misbehaves at
 # cutover, since there are then two candidate causes.
 ARG PELICAN_BASE=hub.opensciencegrid.org/pelican_platform/origin@sha256:7b0c9b88f0e54585959be732f683a79ee4e3175ca8b4b9b37d5a45c4e9ebae30
+#
+# The readable half of that pin. Nothing in the build consumes it -- CI reads
+# it to name the published image and, because a version claim about a digest
+# is exactly the sort of thing that rots across a rebase, checks it against
+# the tags Harbor says the digest actually carries.
+ARG PELICAN_VERSION=7.26.0
 
 FROM ${PELICAN_BASE} AS build
 

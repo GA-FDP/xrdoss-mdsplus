@@ -18,11 +18,10 @@ on:
   pull_request:
     branches:
       - main
+  # Rebuild and publish the versions the Containerfiles name, without needing
+  # a new commit or tag. It takes no tag input: one string cannot correctly
+  # name both images.
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Image tag to publish (e.g. 7.26.0-fdp2.3.0)'
-        required: true
 
 env:
   REGISTRY: ghcr.io
@@ -58,14 +57,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Read the version from the Containerfile rather than repeating it. It
-      # was pinned in five places once; that is how they drift.
-      - name: Read PTDATA_VERSION from the Containerfile
+      # Read the versions from the Containerfiles rather than repeating them.
+      # They were pinned in five places once; that is how they drift.
+      - name: Read the pinned versions
         run: |
-          v=$(sed -n 's/^ARG PTDATA_VERSION=//p' Containerfile.origin | head -1)
-          [ -n "$v" ] || { echo "::error::no ARG PTDATA_VERSION in Containerfile.origin"; exit 1; }
-          echo "PTDATA_VERSION=$v" >> "$GITHUB_ENV"
-          echo "ptdata $v"
+          set -eu
+          ptd=$(sed -n 's/^ARG PTDATA_VERSION=//p' Containerfile.origin | head -1)
+          mds=$(sed -n 's/^ARG PTDATA_VERSION=//p' Containerfile.mdsip | head -1)
+          pel=$(sed -n 's/^ARG PELICAN_VERSION=//p' Containerfile.origin | head -1)
+          [ -n "$ptd" ] || { echo "::error::no ARG PTDATA_VERSION in Containerfile.origin"; exit 1; }
+          [ -n "$pel" ] || { echo "::error::no ARG PELICAN_VERSION in Containerfile.origin"; exit 1; }
+          # Both images are built from ONE staged ptdata tarball, checked out
+          # below at the version read here. If the two Containerfiles disagree,
+          # one of them is silently built from the other's source.
+          [ "$ptd" = "$mds" ] || {
+            echo "::error::PTDATA_VERSION disagrees: origin=$ptd mdsip=$mds"; exit 1; }
+          echo "PTDATA_VERSION=$ptd" >> "$GITHUB_ENV"
+          echo "PELICAN_VERSION=$pel" >> "$GITHUB_ENV"
+          echo "pelican $pel, ptdata $ptd"
+
+      # PELICAN_VERSION is a human claim about a digest, and the two drift the
+      # moment someone rebases the pin without editing the line above it.
+      # Harbor knows which tags the digest carries; ask it rather than trust.
+      - name: The pinned digest must really be that Pelican
+        run: |
+          set -eu
+          digest=$(sed -n 's/.*origin@\(sha256:[0-9a-f]\{64\}\).*/\1/p' Containerfile.origin | head -1)
+          [ -n "$digest" ] || { echo "::error::could not parse the PELICAN_BASE digest"; exit 1; }
+          tags=$(curl -sSf --retry 3 \
+            "https://hub.opensciencegrid.org/api/v2.0/projects/pelican_platform/repositories/origin/artifacts/$digest?with_tag=true" \
+            | python3 -c 'import sys,json; print(" ".join(t["name"] for t in (json.load(sys.stdin).get("tags") or [])))')
+          echo "$digest carries: $tags"
+          case " $tags " in
+            *" v${PELICAN_VERSION} "*) ;;
+            *) echo "::error::PELICAN_VERSION=${PELICAN_VERSION}, but the pinned digest is tagged: $tags"
+               exit 1 ;;
+          esac
 
       # actions/checkout fails a missing token with "Input required and not
       # supplied: token", which names neither the secret nor the fix. Say it
@@ -103,11 +130,32 @@ jobs:
       - name: Work out the tag
         id: meta
         run: |
+          set -eu
+          # Each image is named for what is actually in it: the origin by the
+          # Pelican it derives from plus the ptdata it carries, the sandbox by
+          # ptdata alone -- it is built FROM almalinux:9 and contains no
+          # Pelican at all, so a Pelican version in its tag would be a lie.
+          # These are the tags deploy/*.container reference, and the scheme the
+          # design spec names.
+          case "${{ matrix.name }}" in
+            origin) release="${PELICAN_VERSION}-fdp${PTDATA_VERSION}" ;;
+            mdsip)  release="${PTDATA_VERSION}" ;;
+            *) echo "::error::no tag scheme for ${{ matrix.name }}"; exit 1 ;;
+          esac
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            echo "tag=$release" >> "$GITHUB_OUTPUT"
             echo "push=true" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "tag=${GITHUB_REF_NAME#image-}" >> "$GITHUB_OUTPUT"
+            # The git tag names the release as a whole. If it disagrees with
+            # the Containerfiles, the images would be published under one
+            # version and built from another -- fail rather than pick a winner.
+            want="${PELICAN_VERSION}-fdp${PTDATA_VERSION}"
+            if [ "${GITHUB_REF_NAME#image-}" != "$want" ]; then
+              echo "::error::$GITHUB_REF_NAME does not match the Containerfiles (expected image-$want)"
+              exit 1
+            fi
+            echo "tag=$release" >> "$GITHUB_OUTPUT"
             echo "push=true" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
             echo "tag=main-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
