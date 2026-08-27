@@ -1,5 +1,12 @@
 # The Pelican origin, running GA's derived image.
 #
+# THIS FILE IS AN EXAMPLE, NOT THE DEPLOYED UNIT. GA's origin renders its unit
+# from d3d-origin-admin (etc/fdp-origin.container.in + site.env, installed by
+# bin/install-origin-unit.sh). The two are identical today -- the template was
+# built from this file after it was verified against the live container -- but
+# only one of them can be the source of truth, and it is the one that knows the
+# site's paths and ports.
+#
 # Install to /etc/containers/systemd/ (ROOTFUL -- the origin runs as root
 # today, see docs/d3d-origin-state.md), then:
 #   systemctl daemon-reload && systemctl start fdp-origin
