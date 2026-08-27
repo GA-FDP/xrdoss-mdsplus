@@ -13,8 +13,14 @@
 # container stops when its last session ends.
 #
 # Every option here mirrors scripts/mdsip-sandbox.sh; that script is the
-# reference and this is the deployment vehicle. Changing one without the other
-# is how a control goes missing.
+# reference. Changing one without the other is how a control goes missing.
+#
+# THIS FILE IS AN EXAMPLE, NOT THE DEPLOYED UNIT. GA's origin renders its unit
+# from d3d-origin-admin (etc/fdp-mdsip.container.in + site.env, installed by
+# bin/bootstrap-account.sh), because the values that differ between sites --
+# ports, bind address, archive paths, tree path -- belong in the file that
+# records the site, not in this repo. Take this as a worked example of the
+# CONTROLS; take the port and path values below as illustrative.
 
 [Unit]
 Description=FDP mdsip sandbox (MDSplus server behind the xrdoss-mdsplus plugins)
@@ -37,7 +43,18 @@ ContainerName=fdp-mdsip
 # --internal is the control that turns code execution into a dead end rather
 # than a pivot; without it this unit is not a sandbox.
 Network=fdp-mdsip-net
-PublishPort=127.0.0.1:8000:8000
+
+# Published to the podman bridge gateway, not to 127.0.0.1, because the client
+# is the ORIGIN'S CONTAINER: it dials this address from inside its own netns,
+# where 127.0.0.1 is itself. 10.88.0.1 is podman's default bridge gateway on the
+# host; confirm yours before copying it.
+#
+# And 8100 rather than 8000: the Pelican origin already publishes 8000 and 8443,
+# so binding 8000 here fails outright with the address in use. The origin's
+# relay config must name the same host and port -- in d3d-origin-admin that is
+# MDSIP_BIND_ADDR/MDSIP_PORT, which renders both this line and the
+# http.exthandler line, so they cannot disagree.
+PublishPort=10.88.0.1:8100:8000
 
 ReadOnly=true
 Tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m
