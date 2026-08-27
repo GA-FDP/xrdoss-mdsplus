@@ -1,9 +1,14 @@
 #include "HttpTunnel.hh"
 
+#include "MdsipCall.hh"
+#include "RelayProtocol.hh"
+
 #include <curl/curl.h>
 
+#include <cctype>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 namespace fdp {
@@ -21,6 +26,42 @@ std::string Trim(const std::string &s) {
     while (b < e && (s[b] == ' ' || s[b] == '\n' || s[b] == '\r' || s[b] == '\t')) ++b;
     while (e > b && (s[e-1] == ' ' || s[e-1] == '\n' || s[e-1] == '\r' || s[e-1] == '\t')) --e;
     return s.substr(b, e - b);
+}
+
+std::string Lower(const std::string &s) {
+    std::string out(s);
+    for (size_t i = 0; i < out.size(); ++i)
+        out[i] = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(out[i])));
+    return out;
+}
+
+// Whether `expr` starts with `name` followed by '(' -- i.e. is a call to it.
+// A prefix match alone would make TreeOpenNew look like TreeOpen, which is
+// harmless here but would not be if the two ever needed different handling.
+bool CallsFunction(const std::string &lowered, const char *name) {
+    const size_t n = std::strlen(name);
+    if (lowered.compare(0, n, name) != 0) return false;
+    size_t i = n;
+    while (i < lowered.size() && lowered[i] == ' ') ++i;
+    return i < lowered.size() && lowered[i] == '(';
+}
+
+// A '=' that assigns rather than compares. TDI writes equality as '==' and
+// has '!=', '<=' and '>='; everything else that reaches here is treated as an
+// assignment, because guessing wrong in that direction only costs recovery,
+// while guessing wrong in the other costs correctness.
+bool HasAssignment(const std::string &expr) {
+    for (size_t i = 0; i < expr.size(); ++i) {
+        if (expr[i] != '=') continue;
+        if (i + 1 < expr.size() && expr[i + 1] == '=') { ++i; continue; }
+        if (i > 0) {
+            const char p = expr[i - 1];
+            if (p == '=' || p == '!' || p == '<' || p == '>') continue;
+        }
+        return true;
+    }
+    return false;
 }
 
 }  // namespace
@@ -68,7 +109,45 @@ std::string BuildUrlBase(const std::string &target) {
     return scheme + "://" + hostport + prefix;
 }
 
-HttpTunnel::HttpTunnel() : curl_(0) {
+std::string CallExpression(const std::string &call) {
+    if (call.size() < kHeaderBytes) return std::string();
+
+    const char *hdr = call.data();
+    if (static_cast<unsigned char>(hdr[kDtypeOffset]) != kDtypeCString)
+        return std::string();
+    if (static_cast<unsigned char>(hdr[kDescriptorIdxOffset]) != 0)
+        return std::string();
+
+    unsigned int msglen;
+    std::memcpy(&msglen, hdr + kMsgLenOffset, sizeof(msglen));
+    if (msglen < kHeaderBytes || msglen > call.size()) return std::string();
+
+    short length;
+    std::memcpy(&length, hdr + kLengthOffset, sizeof(length));
+    if (length <= 0) return std::string();
+
+    const size_t want = static_cast<size_t>(length);
+    if (kHeaderBytes + want > msglen) return std::string();
+    return call.substr(kHeaderBytes, want);
+}
+
+CallEffect EffectOf(const std::string &expression) {
+    // Unreadable is not the same as harmless. CallExpression returns empty for
+    // anything it could not parse, and that has to stay on the pessimistic side.
+    if (expression.empty()) return kUnknownEffect;
+
+    const std::string lowered = Lower(Trim(expression));
+    if (CallsFunction(lowered, "treeclose")) return kClosesTree;
+    if (CallsFunction(lowered, "treeopen") ||
+        CallsFunction(lowered, "treeopennew") ||
+        CallsFunction(lowered, "treesetdefault"))
+        return kOpensTree;
+
+    if (HasAssignment(lowered)) return kUnknownEffect;
+    return kNoEffect;
+}
+
+HttpTunnel::HttpTunnel() : curl_(0), replayable_(true), redials_(0) {
     // PUT by default: it is the only method that works both against a
     // directly-addressed origin AND through the Pelican director. Overridable
     // for debugging, not for deployment.
@@ -87,10 +166,15 @@ bool HttpTunnel::Open(const std::string &target, std::string &error) {
     url_base_ = BuildUrlBase(target);
     if (url_base_.empty()) { error = "cannot parse target '" + target + "'"; return false; }
 
-    bearer_ = FindBearerToken();
-
     curl_ = curl_easy_init();
     if (!curl_) { error = "curl_easy_init failed"; return false; }
+
+    return Redial(error);
+}
+
+bool HttpTunnel::Redial(std::string &error) {
+    token_.clear();
+    bearer_ = FindBearerToken();
 
     std::string token;
     if (!Post("/connect", std::string(), false, token, error)) return false;
@@ -100,10 +184,83 @@ bool HttpTunnel::Open(const std::string &target, std::string &error) {
     return true;
 }
 
+void HttpTunnel::Remember(const std::string &request) {
+    // The first call is the login, whatever it happens to look like. It is not
+    // a TDI expression and must not be classified as one -- it carries a
+    // username, and a username is not something to reason about the semantics
+    // of.
+    if (login_.empty()) { login_ = request; return; }
+
+    switch (EffectOf(CallExpression(request))) {
+        case kOpensTree:
+            // Only the latest matters: MDSplus sets the tree context by
+            // overwriting it, so replaying an earlier open would restore a tree
+            // the caller has since moved off.
+            tree_open_ = request;
+            break;
+        case kClosesTree:
+            tree_open_.clear();
+            break;
+        case kUnknownEffect:
+            replayable_ = false;
+            break;
+        case kNoEffect:
+            break;
+    }
+}
+
+bool HttpTunnel::Replay(std::string &error) {
+    // Login first: mdsip answers nothing until it has one, so replaying the
+    // tree open ahead of it fails with "mdsip did not answer" -- which reads
+    // like the relay timing out rather than like a protocol violation.
+    const std::string *const steps[] = { &login_, &tree_open_ };
+    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); ++i) {
+        if (steps[i]->empty()) continue;
+        std::string discarded;
+        if (!Post("/msg", *steps[i], true, discarded, error)) return false;
+    }
+    return true;
+}
+
 bool HttpTunnel::Call(const std::string &request, std::string &answer,
                       std::string &error) {
     if (token_.empty()) { error = "no session"; return false; }
-    return Post("/msg", request, true, answer, error);
+
+    long status = 0;
+    std::string reason;
+    if (Post("/msg", request, true, answer, error, &status, &reason)) {
+        Remember(request);
+        return true;
+    }
+
+    // Only a session the relay no longer holds is worth retrying. Every other
+    // failure -- 401, 409, an unreachable origin, mdsip itself erroring -- is
+    // either the caller's to fix or would fail again identically.
+    if (status != 502 || Trim(reason) != kSessionGone) return false;
+
+    if (!replayable_) {
+        error += " (not redialling: this session holds TDI state a new one "
+                 "could not be given)";
+        return false;
+    }
+
+    const std::string lost = error;
+    std::string redial_error;
+    if (!Redial(redial_error)) {
+        error = lost + " (and redialling failed: " + redial_error + ")";
+        return false;
+    }
+    ++redials_;
+
+    if (!Replay(redial_error)) {
+        error = lost + " (and restoring the new session failed: " +
+                redial_error + ")";
+        return false;
+    }
+
+    if (!Post("/msg", request, true, answer, error)) return false;
+    Remember(request);
+    return true;
 }
 
 void HttpTunnel::Close() {
@@ -114,9 +271,12 @@ void HttpTunnel::Close() {
 }
 
 bool HttpTunnel::Post(const std::string &action, const std::string &body,
-                      bool with_session, std::string &out, std::string &error) {
+                      bool with_session, std::string &out, std::string &error,
+                      long *status, std::string *reason) {
     out.clear();
     error.clear();
+    if (status) *status = 0;
+    if (reason) reason->clear();
     CURL *curl = static_cast<CURL *>(curl_);
     if (!curl) { error = "tunnel is not open"; return false; }
 
@@ -130,7 +290,8 @@ bool HttpTunnel::Post(const std::string &action, const std::string &body,
     if (!bearer_.empty())
         headers = curl_slist_append(headers, ("Authorization: Bearer " + bearer_).c_str());
     if (with_session)
-        headers = curl_slist_append(headers, ("X-Fdp-Session: " + token_).c_str());
+        headers = curl_slist_append(headers,
+                                    (std::string(kSessionHeader) + ": " + token_).c_str());
 
     curl_easy_reset(curl);
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
@@ -166,13 +327,16 @@ bool HttpTunnel::Post(const std::string &action, const std::string &body,
     }
     // No total timeout: a legitimate call can be slow (a wide getMany over a
     // large tree). Bound the connect instead, which is what actually hangs
-    // when the origin is unreachable.
+    // when the origin is unreachable. The relay bounds the same call from its
+    // end -- see its `timeout=` parm, which has to clear the slowest real call
+    // for the same reason there is no ceiling here.
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
 
     const CURLcode rc = curl_easy_perform(curl);
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_slist_free_all(headers);
+    if (status) *status = http_code;
 
     if (rc != CURLE_OK) {
         error = "POST " + url + ": " + curl_easy_strerror(rc);
@@ -183,7 +347,9 @@ bool HttpTunnel::Post(const std::string &action, const std::string &body,
         std::snprintf(code, sizeof(code), "%ld", http_code);
         // The relay puts a one-line reason in the body; surfacing it turns
         // "MDSplus error" into something diagnosable.
-        error = "POST " + url + " -> HTTP " + code + ": " + Trim(out);
+        const std::string trimmed = Trim(out);
+        if (reason) *reason = trimmed;
+        error = "POST " + url + " -> HTTP " + code + ": " + trimmed;
         out.clear();
         return false;
     }

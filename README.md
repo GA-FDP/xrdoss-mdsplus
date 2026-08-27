@@ -329,6 +329,16 @@ stating plainly:
 - a broken stream retires the session instead of resynchronising — a half-written
   call cannot be recovered from, and the alternative is handing the next caller
   misaligned bytes
+- `timeout=` (default **600s**) bounds one call. It is not a liveness check: a
+  busy mdsip and a wedged one are indistinguishable from this side of the
+  socket, so the number has to clear the slowest *legitimate* call. It was 60s,
+  which a 285-expression ptdata `getMany` overran under load — and because a
+  timed-out call retires the session, that single overrun killed every later
+  fetch in the client process (GA-FDP/imas_composer CI run 33033220932)
+- the client survives losing a session either way: `HttpTunnel::Call` redials
+  and replays the login and tree open before retrying once. It declines to do
+  so once the session has been given TDI state a new one could not be
+  reconstructed with — see `CallEffect` in `src/HttpTunnel.hh`
 
 The relay links **no MDSplus library at all** (`readelf -d` shows only
 `libXrdUtils`, `libXrdHttpUtils` and libc), speaking mdsip over a plain socket.

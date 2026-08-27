@@ -1,5 +1,7 @@
 #include "MdsipSession.hh"
 
+#include "RelayProtocol.hh"
+
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -177,7 +179,7 @@ bool MdsipSessions::Relay(const std::string &token, const std::string &request,
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const std::map<std::string, Session>::iterator it = sessions_.find(token);
-        if (it == sessions_.end()) { error = "unknown or expired session"; return false; }
+        if (it == sessions_.end()) { error = kSessionGone; return false; }
         if (it->second.busy) {
             error = "session already has a call in flight";
             if (busy) *busy = true;

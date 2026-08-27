@@ -18,6 +18,12 @@ namespace fdp {
 // Consequences worth knowing: sessions are sticky to one origin and cannot be
 // load balanced, and an abandoned session holds an mdsip connection until it
 // times out.
+//
+// A retired session is not the client's fault and must not be terminal for it.
+// The transport redials and replays the login and tree open (HttpTunnel::Call),
+// which is why `timeout_ms` can afford to be generous rather than defensive:
+// the cost of a false timeout is a redial, and the cost of a real hang is an
+// mdsip process held for that long.
 class MdsipSessions {
 public:
     MdsipSessions(std::string host, int port, int idle_seconds,

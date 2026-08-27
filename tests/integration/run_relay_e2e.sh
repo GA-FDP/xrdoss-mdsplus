@@ -206,6 +206,14 @@ PYEOF
     python "$ROOT/tests/integration/transport_edge_cases.py" \
     || fail "transport edge cases failed"
 
+  echo "--- 8. a session lost under the client is recovered from ---"
+  LD_LIBRARY_PATH="$ROOT/build:${LD_LIBRARY_PATH:-}" \
+  FDP_TUNNEL_SCHEME=http \
+  RELAY_HTTP_PORT="$HTTP_PORT" \
+  RELAY_XROOTD_LOG="$WORK/xrootd.log" \
+    python "$ROOT/tests/integration/relay_session_recovery.py" \
+    || fail "the transport did not survive losing its session"
+
   sleep 2   # let the relay notice the closes
   AFTER="$(count_mdsip)"
   echo "  mdsip processes: $BEFORE before, $AFTER after ~50 sessions"

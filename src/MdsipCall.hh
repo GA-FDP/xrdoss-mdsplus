@@ -57,8 +57,16 @@ const size_t kHeaderBytes = 48;
 // that struct, because a wrong offset here would silently mis-frame rather
 // than fail.
 const size_t kMsgLenOffset = 0;
+const size_t kLengthOffset = 8;
 const size_t kNargsOffset = 10;
 const size_t kDescriptorIdxOffset = 11;
+const size_t kDtypeOffset = 13;
+
+// DTYPE_T, "character string" (third_party/mdsplus/dtypedef.h: DEFINE(T, 14)).
+// MDSplus sends a call's expression as descriptor 0 with this dtype --
+// Connection.get is literally _SendArg(conid, 0, 14, ...) -- which is what
+// lets the transport read the expression back out of its own byte stream.
+const unsigned char kDtypeCString = 14;
 
 }  // namespace fdp
 

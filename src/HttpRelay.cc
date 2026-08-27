@@ -24,6 +24,7 @@
 #include "XrdHttp/XrdHttpExtHandler.hh"
 
 #include "PointStore.hh"
+#include "RelayProtocol.hh"
 #include "XrdOuc/XrdOucEnv.hh"
 #include "XrdOuc/XrdOucErrInfo.hh"
 #include "XrdSec/XrdSecEntity.hh"
@@ -43,8 +44,6 @@
 XrdVERSIONINFO(XrdHttpGetExtHandler, XrdHttpMdsip);
 
 namespace {
-
-const char *const kSessionHeader = "x-fdp-session";
 
 // Ask BuffgetData for no more than this at a time. The HTTP read buffer is
 // 1 MB (XrdHttpProtocol.cc: BPool->Obtain(1024*1024)), and requesting more than
@@ -316,7 +315,7 @@ private:
     }
 
     int DoMsg(XrdHttpExtReq &req) {
-        const std::string token = HeaderValue(req.headers, kSessionHeader);
+        const std::string token = HeaderValue(req.headers, fdp::kSessionHeader);
         if (token.empty())
             return Fail(req, 400, "Bad Request", "missing X-Fdp-Session");
 
@@ -389,7 +388,7 @@ private:
     }
 
     int DoClose(XrdHttpExtReq &req) {
-        const std::string token = HeaderValue(req.headers, kSessionHeader);
+        const std::string token = HeaderValue(req.headers, fdp::kSessionHeader);
         if (!token.empty()) sessions_.Close(token);
         return req.SendSimpleResp(200, "OK", 0, "", 0);
     }
@@ -417,8 +416,19 @@ extern "C" XrdHttpExtHandler *XrdHttpGetExtHandler(XrdSysError *eDest,
     const std::string port_str = ParmValue(parms, "port", "8000");
     const int port             = std::atoi(port_str.c_str());
     const int idle             = std::atoi(ParmValue(parms, "idle", "300").c_str());
+    // How long one mdsip call may take to answer. This is not a liveness
+    // check: an mdsip busy evaluating is indistinguishable, from the relay's
+    // side of the socket, from an mdsip that will never answer, so the number
+    // has to clear the slowest LEGITIMATE call rather than the typical one.
+    //
+    // 60 s did not. A 95-pointname ptdata getMany -- 285 PTDATA2/dim_of/pthead2
+    // evaluations returning 539 MB, an ordinary imas_composer magnetics fetch --
+    // measures 11 s of server-side compute warm and crossed 60 s under load,
+    // taking the session down with it (GA-FDP/imas_composer CI run 33033220932).
+    // The client sets no total timeout at all for exactly this reason, and says
+    // so (HttpTunnel.cc, CURLOPT_CONNECTTIMEOUT); the two ends now agree.
     const int timeout_ms =
-        std::atoi(ParmValue(parms, "timeout", "60").c_str()) * 1000;
+        std::atoi(ParmValue(parms, "timeout", "600").c_str()) * 1000;
     const size_t max_sessions =
         std::strtoul(ParmValue(parms, "maxsessions", "256").c_str(), 0, 10);
 

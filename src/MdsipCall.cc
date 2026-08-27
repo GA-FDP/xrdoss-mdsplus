@@ -27,7 +27,9 @@ struct MsgHdrMirror {
 static_assert(sizeof(MsgHdrMirror) == kHeaderBytes,
               "MsgHdr is 48 bytes on the wire");
 static_assert(offsetof(MsgHdrMirror, msglen) == kMsgLenOffset, "msglen offset");
+static_assert(offsetof(MsgHdrMirror, length) == kLengthOffset, "length offset");
 static_assert(offsetof(MsgHdrMirror, nargs) == kNargsOffset, "nargs offset");
+static_assert(offsetof(MsgHdrMirror, dtype) == kDtypeOffset, "dtype offset");
 static_assert(offsetof(MsgHdrMirror, descriptor_idx) == kDescriptorIdxOffset,
               "descriptor_idx offset");
 

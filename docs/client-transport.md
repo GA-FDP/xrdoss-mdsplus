@@ -82,6 +82,44 @@ survive it.
 produces every byte returned, which is why `get`, `getMany`, `put`, `setDefault`
 and everything else work without being enumerated anywhere.
 
+## Surviving a session that dies underneath you
+
+A session can go away without the caller doing anything wrong: the relay retires
+one whenever a call fails — a call that overran its `timeout=`, most of all —
+and reaps one that has been idle past `idle=`. Every later call then comes back
+`502 unknown or expired session`, and that used to be terminal. Nothing in the
+stack redialled, and `toksearch`'s `MdsConnectionRegistry` hands the same
+`MDSplus.Connection` to every caller in the process for its whole life, so one
+lost session meant every remaining fetch failed. Measured: GA-FDP/imas_composer
+CI run 33033220932, one slow call and then 25 dead ones on the same worker,
+while the other worker's session carried on fine.
+
+`Call()` now redials once on that specific 502 and retries. What makes it more
+than a retry loop is that mdsip is stateful, so a fresh session has to be told
+what the old one knew — in order:
+
+1. **The login.** MDSplus sends it as the first call on a connection; the relay
+   only opens a TCP socket and does not speak the protocol, so a session that
+   has not been given it is one mdsip answers nothing on. Skipping it produces
+   `mdsip did not answer`, which reads like a timeout and is not one.
+2. **The tree context.** `openTree` is `TreeOpen($,$)` — an ordinary call, whose
+   bytes the transport already buffered — so replaying the latest one restores
+   it exactly.
+
+What cannot be restored is TDI's private variables. After `get("_sig = ...")` a
+new session answers `get("_sig")` with something else, and quietly returning
+that would be worse than the dead tunnel this exists to avoid. So an expression
+carrying an `=` that is not a comparison marks the session unreplayable and the
+redial is declined, with the reason said out loud. `CallExpression` reads the
+expression back out of descriptor 0 of the call's own bytes, and returns empty
+for anything it cannot parse — which classifies as unreplayable too, because
+"unreadable" and "harmless" are not the same thing.
+
+The bearer token is re-read on every redial rather than reused. FDP access
+tokens are short-lived and `/connect` is the only point at which the relay
+checks one, so a long pipeline's original token may well be expired by the time
+a redial needs it.
+
 ## The part that needed care
 
 **Call framing.** `send()` receives whatever chunking MDSplus chose — not one
@@ -162,6 +200,14 @@ Lifecycle and error paths are covered separately
 session, state surviving repeated `openTree`, 8 independent connections, 40
 connect/disconnect cycles, errors raising as errors, the session still usable
 afterwards, and an unreachable origin failing rather than hanging.
+
+Recovery is driven for real rather than mocked
+(`tests/integration/relay_session_recovery.py`): a second handler instance
+configured `idle=1` reaps the session out from under a client that is behaving
+perfectly, and the next read must return the *same* array — which only holds if
+the tree context came back with it. The check fails if the relay log shows no
+lost session at all, because a recovery test that never loses anything passes
+for the wrong reason.
 
 Session leaks are checked by counting mdsip processes — `mdsip -m` forks per
 connection, so a leaked relay session is a leaked process. Measured 1 before and
