@@ -93,7 +93,7 @@ RUN set -eux; \
 # the image history. Produce it first:
 #
 #   scripts/fetch-ptdata-src.sh 2.2.0
-ARG PTDATA_VERSION=2.3.0
+ARG PTDATA_VERSION=2.3.1
 
 COPY ptdata-src.tar.gz /tmp/ptdata.tar.gz
 RUN mkdir -p /tmp/ptdata \

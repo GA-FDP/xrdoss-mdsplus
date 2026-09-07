@@ -65,7 +65,7 @@ Wants=network-online.target
 # same libptd3d binary, so splitting visibility would protect nothing while
 # adding a token to rotate and an auth file to keep off a runtime directory
 # that a reboot wipes.
-Image=ghcr.io/ga-fdp/fdp-origin:7.26.0-fdp2.3.0
+Image=ghcr.io/ga-fdp/fdp-origin:7.26.0-fdp2.3.1
 ContainerName=pelican-origin
 
 # 8000 as well as 8443: the origin holds both, which is why the mdsip sandbox
