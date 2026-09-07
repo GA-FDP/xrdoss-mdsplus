@@ -1,0 +1,21 @@
+#!/bin/sh
+# One accepted connection.
+#
+# The accepted socket arrives on fd 0, 1 AND 2, so mdsip's own diagnostics would
+# be written INTO the protocol stream -- the client sees a failed connect, not a
+# log line. Both must be redirected before exec. Upstream's mdsipd does exactly
+# this. /tmp is the sandbox's only writable mount (tmpfs), so these logs are
+# per-container and deliberately non-persistent.
+#
+# The ptdata index records absolute Pelican URLs, which reach open(2) verbatim
+# and -- lacking a leading slash -- resolve RELATIVE to the working directory.
+# So this is load-bearing, not hygiene: socat's child inherits socat's cwd,
+# which is why the image's WORKDIR is not sufficient. Without it every ptdata
+# lookup fails as "file not found" with nothing pointing at the cause.
+cd /
+
+# No -m: that flag shares ONE tree context across every connection, so
+# concurrent clients silently read each other's shots. Containerfile.mdsip
+# fails the build if it reappears.
+exec /usr/local/mdsplus/bin/mdsip -p 8000 -h /etc/mdsip.hosts -c 0 \
+     >>/tmp/mdsip.access 2>>/tmp/mdsip.errors

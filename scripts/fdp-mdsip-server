@@ -1,0 +1,14 @@
+#!/bin/sh
+# The mdsip listener: one process per accepted connection.
+#
+#   fork    a new process per connection -- the whole point. Without it, one
+#           mdsip serves every client and they share tree state.
+#   nofork  do NOT interpose a socketpair; exec the child directly on the
+#           accepted socket so it lands on fd 0/1/2 exactly as inetd would.
+#           Without this, socat relays through a pipe and mdsip's getpeername
+#           sees a socketpair instead of the client.
+#
+# Losing either flag serves shared tree state again -- silently, and only under
+# concurrency. Containerfile.mdsip greps this file for both.
+exec /usr/bin/socat TCP-LISTEN:8000,fork,reuseaddr \
+     EXEC:/usr/local/bin/fdp-mdsip-connection,nofork

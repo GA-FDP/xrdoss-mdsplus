@@ -244,40 +244,17 @@ RUN set -eux; \
 #
 # Only now is the --pids-limit rationale true: with one process per connection
 # it is what bounds a fork bomb.
-# The listener. Kept as a file rather than inlined into ENTRYPOINT so the build
-# can assert `fork` is still in it: losing that flag would serve shared tree
-# state again, silently, and only under concurrency.
+# The listener and the per-connection script, as real files under scripts/.
 #
-#   fork    a new process per accepted connection -- the whole point
-#   nofork  do NOT interpose a socketpair; exec the child directly on the
-#           accepted socket, so it lands on fd 0/1/2 exactly as inetd would.
-#           Without this, socat relays through a pipe and mdsip's getpeername
-#           sees a socketpair instead of the client.
-COPY --chmod=0755 <<'EOF' /usr/local/bin/fdp-mdsip-server
-#!/bin/sh
-exec /usr/bin/socat TCP-LISTEN:8000,fork,reuseaddr \
-     EXEC:/usr/local/bin/fdp-mdsip-connection,nofork
-EOF
-
-COPY --chmod=0755 <<'EOF' /usr/local/bin/fdp-mdsip-connection
-#!/bin/sh
-# The accepted socket arrives on fd 0, 1 AND 2, so mdsip's own diagnostics would
-# be written INTO the protocol stream -- the client sees a failed connect, not a
-# log line. Both must be redirected before exec. Upstream's mdsipd does exactly
-# this. /tmp is the sandbox's only writable mount (tmpfs), so these logs are
-# per-container and deliberately non-persistent.
+# They were heredocs (COPY <<'EOF'). Buildah stopped accepting that form -- the
+# build failed with `copier: stat: "/<<EOF": no such file or directory` on a
+# Containerfile that had not changed -- so they are ordinary files now, which
+# also makes them `sh -n`-checkable and greppable outside a build.
 #
-# The ptdata index records absolute Pelican URLs, which reach open(2) verbatim
-# and -- lacking a leading slash -- resolve RELATIVE to the working directory.
-# So this is load-bearing, not hygiene: socat's child inherits socat's cwd,
-# which is why the image's WORKDIR is not sufficient. Without it every ptdata
-# lookup fails as "file not found" with nothing pointing at the cause.
-cd /
-
-# No -m: that flag shares one tree context across every connection.
-exec /usr/local/mdsplus/bin/mdsip -p 8000 -h /etc/mdsip.hosts -c 0 \
-     >>/tmp/mdsip.access 2>>/tmp/mdsip.errors
-EOF
+# The comments explaining fork/nofork and the `cd /` live in the scripts, next
+# to the lines they justify. The assertions below still read the installed
+# copies, so they check what actually ships rather than what is in the repo.
+COPY --chmod=0755 scripts/fdp-mdsip-server scripts/fdp-mdsip-connection /usr/local/bin/
 
 # Checked after the scripts exist, not with the MDSplus checks above.
 RUN set -eux; \
