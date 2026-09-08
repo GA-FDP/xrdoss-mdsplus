@@ -519,9 +519,10 @@ extern "C" XrdHttpExtHandler *XrdHttpGetExtHandler(XrdSysError *eDest,
             eDest->Say("------ XrdHttpMdsip point: pointstoreroot is not set; "
                        "falling back to the retired pointroot=",
                        legacy_root.c_str(),
-                       ". Update site.env: pointindex, pointindexpattern, "
-                       "pointurlprefix and pointroot are ignored now and will "
-                       "be rejected in the next release.");
+                       ". pointroot is being USED as the store root here; "
+                       "pointindex, pointindexpattern and pointurlprefix are "
+                       "ignored. Set pointstoreroot in site.env -- all four "
+                       "retired names are rejected in the next release.");
         }
 
         if (point_store_root.empty()) {
