@@ -7,18 +7,22 @@
 
 namespace fdp {
 
-// Resolves one (shot, pointname) to its raw record bytes, through the ptdata
-// JSON index and nothing else.
+// Resolves one (shot, pointname) to its raw record bytes through the per-shot
+// versioned store: a catalog snapshot names the shot's version, and that
+// version directory's own meta/index.json names the extension. The shotfile
+// path is CONSTRUCTED from the version directory, never recorded (store spec
+// §4.7b) -- which is why there is no URL rewrite here any more, and no
+// pointurlprefix/pointroot pair that has to be set together to avoid silently
+// resolving every entry as a missing file.
 //
-// Index-only is structural rather than configured: this holds an IndexPlugin
-// and reads the file it names, with no ShotLocator behind it, so there is no
-// tier to fall through to -- no SYS_D3 scan, and no ptserver socket. That
-// matters twice. A directory scan is far more expensive than the lookup it
-// would replace, because the archive lives on a parallel filesystem where
-// every stat is a metadata round trip. And a process serving an origin's own
-// files has no business dialling anywhere, so the absence of a ptserver tier
-// is better had by construction than by setting PTDATA_PTSERVERS=none and
-// trusting it.
+// Index-only is structural rather than configured: this holds a StoreIndex and
+// reads the file it names, with no ShotLocator behind it, so there is no tier
+// to fall through to -- no SYS_D3 scan, and no ptserver socket. That matters
+// twice. A directory scan is far more expensive than the lookup it would
+// replace, because the archive lives on a parallel filesystem where every stat
+// is a metadata round trip. And a process serving an origin's own files has no
+// business dialling anywhere, so the absence of a ptserver tier is better had
+// by construction than by setting PTDATA_PTSERVERS=none and trusting it.
 //
 // No ptdata header appears here on purpose. ptdata requires C++20 (std::span,
 // std::optional) while this repo builds at C++14 for XRootD and MDSplus, so
@@ -29,14 +33,25 @@ public:
     struct Record {
         bool found = false;
         std::vector<std::uint8_t> bytes;
-        std::string extension;   // ".MAG" etc., from the path the index chose
+        std::string extension;   // ".MAG" etc., from the index
+        int         version = 0; // the store version it came from
+        std::string snapshot;    // the catalog snapshot that named that version
+
+        // A miss the caller must LOG rather than pass on silently: the catalog
+        // promised a version whose index is missing or unreadable. Kept
+        // separate from `found` because one corrupt shot must not fail
+        // requests for every other shot -- see spec §4.3. An ordinary miss
+        // (never minted, unknown pointname) leaves this false.
+        bool        defect = false;
+        std::string detail;      // what to put in that log line
     };
 
-    // index_pattern may be empty (use index_dir as given) or a glob such as
-    // "json_indexes_*", selecting the lexical-max match beneath index_dir --
-    // chronological order, for that naming scheme.
-    PointStore(const std::string &index_dir, const std::string &index_pattern,
-               const std::string &url_prefix, const std::string &local_root);
+    // store_root: the namespace root holding catalog/ and views/, e.g.
+    //             "/fdp-d3d" as seen inside the origin container.
+    // catalog_pattern: glob selecting snapshots under <store_root>/catalog;
+    //             empty means the built-in default.
+    PointStore(const std::string &store_root,
+               const std::string &catalog_pattern);
     ~PointStore();
 
     PointStore(const PointStore &) = delete;
@@ -44,9 +59,12 @@ public:
 
     // A miss returns {found=false} and never throws: absent data is the
     // ordinary case and the client's provider chain advances on it. Genuine
-    // failures -- unreadable file, malformed header -- throw
+    // failures -- unreadable shotfile, malformed header -- throw
     // ptdata::PtDataError, which the caller turns into a 500.
     Record Read(int shot, const std::string &pointname);
+
+    // The snapshot currently in use, for the startup banner.
+    std::string CurrentSnapshot();
 
 private:
     struct Impl;
