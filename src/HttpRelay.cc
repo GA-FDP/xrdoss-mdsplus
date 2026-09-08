@@ -114,7 +114,7 @@ std::string UrlDecode(const std::string &s) {
 // "/165920/IP?ext=.MAG" -> shot "165920", pointname "IP".
 //
 // The query string is dropped: ?ext is a hint, and resolution here is
-// index-first, where JsonIndexPlugin::resolve takes only (pointname, shot).
+// index-first, where StoreIndex::resolve takes only (shot, pointname).
 // The index decides which extension holds a pointname, and the response says
 // which one answered.
 bool SplitPointPath(const std::string &rest, std::string &shot,
@@ -536,12 +536,25 @@ extern "C" XrdHttpExtHandler *XrdHttpGetExtHandler(XrdSysError *eDest,
         // Said only once a root is known good, so it cannot contradict the
         // refusal above by announcing that pointstoreroot "is in effect" a
         // line before declining to load.
-        if (!used_fallback
-            && (!legacy_index.empty() || !legacy_urlprefix.empty()
-                || !legacy_pattern.empty() || !legacy_root.empty()))
-            eDest->Say("------ XrdHttpMdsip point: ignoring retired parameters "
-                       "(pointindex, pointindexpattern, pointurlprefix, "
-                       "pointroot); pointstoreroot is in effect.");
+        if (!used_fallback) {
+            // Name only what is actually set: telling an operator we are
+            // ignoring pointroot when they never configured it sends them
+            // hunting through site.env for something that is not there.
+            std::string stale;
+            const auto note = [&stale](const char *n, const std::string &v) {
+                if (v.empty()) return;
+                if (!stale.empty()) stale += ", ";
+                stale += n;
+            };
+            note("pointindex", legacy_index);
+            note("pointindexpattern", legacy_pattern);
+            note("pointurlprefix", legacy_urlprefix);
+            note("pointroot", legacy_root);
+            if (!stale.empty())
+                eDest->Say("------ XrdHttpMdsip point: ignoring retired "
+                           "parameter(s) ", stale.c_str(),
+                           "; pointstoreroot is in effect.");
+        }
 
         // Only meaningful when authorization is delegated: with auth=none
         // Authorized() returns true before ever looking at a path, so
