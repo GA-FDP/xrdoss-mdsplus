@@ -373,15 +373,33 @@ private:
             return Fail(req, 500, "Internal Server Error", e.what());
         }
 
-        if (!rec.found)
+        if (!rec.found) {
+            // A catalog row whose index is missing or unreadable is a defect,
+            // but it must not fail requests for other shots -- so it is a loud
+            // miss, not a 500. An ordinary miss stays silent.
+            if (rec.defect)
+                log_->Emsg("point", "catalog names a version with no usable "
+                           "index:", rec.detail.c_str());
             return Fail(req, 404, "Not Found",
                         "no point " + pointname + " for shot " + shot_s);
+        }
 
         // No trailing CRLF: XrdHttpProtocol appends one itself, and a second
-        // would end the header block early and truncate the response.
-        const std::string extra = rec.extension.empty()
-            ? std::string()
-            : "X-Ptdata-Extension: " + rec.extension;
+        // would end the header block early and truncate the response. So CRLF
+        // goes BETWEEN lines and never after the last.
+        //
+        // Snapshot and version let a client detect a run that straddled a
+        // snapshot swap: every response in one run should carry the same
+        // token.
+        std::string extra;
+        const auto add = [&extra](const std::string &line) {
+            if (!extra.empty()) extra += "\r\n";
+            extra += line;
+        };
+        if (!rec.extension.empty()) add("X-Ptdata-Extension: " + rec.extension);
+        if (!rec.snapshot.empty())  add("X-Ptdata-Snapshot: " + rec.snapshot);
+        if (rec.version > 0)        add("X-Ptdata-Version: "
+                                        + std::to_string(rec.version));
 
         return req.SendSimpleResp(200, "OK", extra.empty() ? 0 : extra.c_str(),
                                   reinterpret_cast<const char *>(rec.bytes.data()),
@@ -440,12 +458,22 @@ extern "C" XrdHttpExtHandler *XrdHttpGetExtHandler(XrdSysError *eDest,
     // on the mdsip host, refuse to load unless told which mode this is.
     // The point endpoint. Absent pointprefix leaves it off entirely, so this
     // ships dark and an origin that only wants the relay is unaffected.
-    const std::string point_prefix    = ParmValue(parms, "pointprefix", "");
-    const std::string point_authpath  = ParmValue(parms, "pointauthpath", "");
-    const std::string point_index     = ParmValue(parms, "pointindex", "");
-    const std::string point_pattern   = ParmValue(parms, "pointindexpattern", "");
-    const std::string point_urlprefix = ParmValue(parms, "pointurlprefix", "");
-    const std::string point_root      = ParmValue(parms, "pointroot", "");
+    const std::string point_prefix   = ParmValue(parms, "pointprefix", "");
+    const std::string point_authpath = ParmValue(parms, "pointauthpath", "");
+    const std::string point_pattern  = ParmValue(parms, "pointcatalogpattern",
+                                                 "catalog_*");
+    std::string point_store_root     = ParmValue(parms, "pointstoreroot", "");
+
+    // Retired by the store migration, tolerated for ONE release so a new image
+    // can run against a site.env that has not moved yet. pointroot was already
+    // the namespace root ("/fdp-d3d"), which is exactly the store root, so the
+    // fallback below is exact rather than approximate. The reverse direction --
+    // an OLD image against a site.env that has dropped pointindex -- cannot be
+    // made safe here and is caught by preflight instead.
+    const std::string legacy_index     = ParmValue(parms, "pointindex", "");
+    const std::string legacy_pattern   = ParmValue(parms, "pointindexpattern", "");
+    const std::string legacy_urlprefix = ParmValue(parms, "pointurlprefix", "");
+    const std::string legacy_root      = ParmValue(parms, "pointroot", "");
 
     const std::string auth = ParmValue(parms, "auth", "");
     const std::string authpath = ParmValue(parms, "authpath", prefix);
@@ -484,12 +512,36 @@ extern "C" XrdHttpExtHandler *XrdHttpGetExtHandler(XrdSysError *eDest,
     // a mistake -- the hardest kind of misconfiguration to trace.
     fdp::PointStore *points = 0;
     if (!point_prefix.empty()) {
-        if (point_index.empty()) {
+        bool used_fallback = false;
+        if (point_store_root.empty() && !legacy_root.empty()) {
+            point_store_root = legacy_root;
+            used_fallback = true;
+            eDest->Say("------ XrdHttpMdsip point: pointstoreroot is not set; "
+                       "falling back to the retired pointroot=",
+                       legacy_root.c_str(),
+                       ". Update site.env: pointindex, pointindexpattern, "
+                       "pointurlprefix and pointroot are ignored now and will "
+                       "be rejected in the next release.");
+        }
+
+        if (point_store_root.empty()) {
             eDest->Emsg("point", "refusing to load: pointprefix is set but "
-                        "pointindex is not, so every lookup would 404 and read "
-                        "as absent data rather than as misconfiguration.");
+                        "neither pointstoreroot nor the retired pointroot is, "
+                        "so every lookup would 404 and read as absent data "
+                        "rather than as misconfiguration.");
             return 0;
         }
+
+        // Said only once a root is known good, so it cannot contradict the
+        // refusal above by announcing that pointstoreroot "is in effect" a
+        // line before declining to load.
+        if (!used_fallback
+            && (!legacy_index.empty() || !legacy_urlprefix.empty()
+                || !legacy_pattern.empty() || !legacy_root.empty()))
+            eDest->Say("------ XrdHttpMdsip point: ignoring retired parameters "
+                       "(pointindex, pointindexpattern, pointurlprefix, "
+                       "pointroot); pointstoreroot is in effect.");
+
         // Only meaningful when authorization is delegated: with auth=none
         // Authorized() returns true before ever looking at a path, so
         // demanding one there would force a value that changes nothing.
@@ -501,26 +553,15 @@ extern "C" XrdHttpExtHandler *XrdHttpGetExtHandler(XrdSysError *eDest,
                         "this port.");
             return 0;
         }
-        if (point_urlprefix.empty() != point_root.empty()) {
-            eDest->Emsg("point", "refusing to load: pointurlprefix and "
-                        "pointroot must be set together -- one alone silently "
-                        "disables the rewrite, and every index entry then "
-                        "resolves as a missing file.");
-            return 0;
-        }
         try {
-            // MINIMAL call-site update so PointStore's new signature compiles
-            // and its tests can run. point_root is already the namespace root
-            // ("/fdp-d3d"), which IS the store root. The proper parameters --
-            // pointstoreroot, pointcatalogpattern, the fallback and the
-            // refuse-to-load matrix -- land in the next commit.
-            points = new fdp::PointStore(point_root, "catalog_*");
+            points = new fdp::PointStore(point_store_root, point_pattern);
         } catch (const std::exception &e) {
             eDest->Emsg("point", "refusing to load: cannot open the point "
                         "store:", e.what());
             return 0;
         }
-        const std::string pbanner = point_prefix + " -> store " + point_root;
+        const std::string pbanner = point_prefix + " -> store "
+            + point_store_root + " snapshot " + points->CurrentSnapshot();
         eDest->Say("++++++ XrdHttpMdsip point endpoint: ", pbanner.c_str());
     }
 
