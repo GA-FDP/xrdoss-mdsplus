@@ -9,8 +9,13 @@
 # The MDSplus static archives are linked in, so the resulting plugin has NO
 # MDSplus runtime dependency and drops into the STOCK origin image unchanged.
 #
-#   podman build -f Containerfile.build -t xrdoss-mdsplus-build .
+#   scripts/fetch-ptdata-src.sh          # stage the pinned ptdata source
+#   podman build -f Containerfile.origin -t xrdoss-mdsplus-build .
 #   podman run --rm -v "$PWD/out:/out:z" xrdoss-mdsplus-build
+#
+# (This file was Containerfile.build once; the old name in these instructions
+# outlived the rename and sent at least one person looking for a file that is
+# not here.)
 #
 # Note the MDSplus binary RPMs ship static libraries but no headers at all
 # (mdsplus-devel_bin is 19 files, all .a), so the headers are vendored from
