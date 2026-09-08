@@ -509,14 +509,18 @@ extern "C" XrdHttpExtHandler *XrdHttpGetExtHandler(XrdSysError *eDest,
             return 0;
         }
         try {
-            points = new fdp::PointStore(point_index, point_pattern,
-                                    point_urlprefix, point_root);
+            // MINIMAL call-site update so PointStore's new signature compiles
+            // and its tests can run. point_root is already the namespace root
+            // ("/fdp-d3d"), which IS the store root. The proper parameters --
+            // pointstoreroot, pointcatalogpattern, the fallback and the
+            // refuse-to-load matrix -- land in the next commit.
+            points = new fdp::PointStore(point_root, "catalog_*");
         } catch (const std::exception &e) {
             eDest->Emsg("point", "refusing to load: cannot open the point "
-                        "index:", e.what());
+                        "store:", e.what());
             return 0;
         }
-        const std::string pbanner = point_prefix + " -> index " + point_index;
+        const std::string pbanner = point_prefix + " -> store " + point_root;
         eDest->Say("++++++ XrdHttpMdsip point endpoint: ", pbanner.c_str());
     }
 
