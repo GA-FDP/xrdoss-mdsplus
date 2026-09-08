@@ -30,7 +30,7 @@
 # sandbox whose threat model assumes the client already has code execution.
 FROM almalinux:9 AS ptdata-build
 
-ARG PTDATA_VERSION=2.3.1
+ARG PTDATA_VERSION=2.4.0
 
 RUN dnf -y install gcc-c++ cmake make tar gzip \
  && dnf clean all && rm -rf /var/cache/dnf
