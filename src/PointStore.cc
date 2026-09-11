@@ -68,11 +68,26 @@ PointStore::Record PointStore::Read(const Request &req) {
     // The snapshot is immutable, but a file it names can still be absent --
     // an incomplete publish, or a path pruned underneath us. Absent data, not
     // an error, so the client's chain advances.
-    if (!impl_->io.stat(look.resolution->path)) return out;
+    if (!impl_->io.stat(look.resolution->path)) {
+        // The catalog and manifest proved this version was minted, but its
+        // payload is gone -- pruned, or an incomplete publish. For an
+        // UNPINNED read that is ordinary absence and the client's chain
+        // advances. For a PINNED one it is the pin failing: the caller asked
+        // for a specific version and cannot have it, which is a 409, not an
+        // authoritative "this point never existed".
+        out.pin_failed = req.version > 0 || !req.snapshot.empty();
+        return out;
+    }
 
     ptdata::ShotFile sf(impl_->io, look.resolution->path);
     const auto entry = sf.find(pointname);
-    if (!entry) return out;
+    if (!entry) {
+        // Same reasoning: the shotfile for the pinned version exists but does
+        // not carry this pointname. Unpinned, ordinary absence; pinned, the
+        // request cannot be satisfied as asked.
+        out.pin_failed = req.version > 0 || !req.snapshot.empty();
+        return out;
+    }
 
     out.bytes     = sf.read_point(*entry);
     out.extension = look.resolution->extension;
