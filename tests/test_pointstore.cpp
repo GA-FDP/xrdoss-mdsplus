@@ -65,6 +65,17 @@ void WriteIndex(const std::string &root, int version) {
 
 // Symlinked, not copied: 165920.MAG is 323 MB and the bytes must be real for
 // the ShotFile parse to mean anything.
+// v<N>.manifest.json, the mint marker beside the version directory. Its
+// EXISTENCE is what distinguishes a real mint from a stray path -- StoreIndex
+// requires it before honouring a pinned version.
+void WriteManifest(const std::string &root, int version) {
+    const std::string d = root + "/views/shots/1659/165920";
+    MkdirP(d);
+    std::ofstream f(d + "/v" + std::to_string(version) + ".manifest.json");
+    f << "{\"shot\": 165920, \"version\": " << version
+      << ", \"parent\": null, \"minted_at\": \"2026-08-28T03:31:43Z\"}";
+}
+
 void LinkShotfile(const std::string &root, int version) {
     const std::string d = VersionDir(root, version) + "/ptdata";
     MkdirP(d);
@@ -211,4 +222,64 @@ TEST_CASE("version and snapshot are set only once resolution succeeds") {
 TEST_CASE("CurrentSnapshot names the snapshot in use, for the banner") {
     fdp::PointStore store(BuildStore(), "catalog_*");
     CHECK(store.CurrentSnapshot() == kStamp);
+}
+
+TEST_CASE("a pinned version resolves to that version, not the catalog's") {
+    if (!HaveShot()) return;
+    const std::string root = TempDir();
+    WriteCatalog(root, 165920, 2);      // catalog says v2 is latest
+    WriteIndex(root, 1);
+    WriteIndex(root, 2);
+    WriteManifest(root, 1);
+    WriteManifest(root, 2);
+    LinkShotfile(root, 1);
+    LinkShotfile(root, 2);
+
+    fdp::PointStore store(root, "catalog_*");
+    fdp::PointStore::Request req;
+    req.shot = 165920;
+    req.pointname = "IP";
+    req.version = 1;                    // ask for the OLDER one
+
+    const auto rec = store.Read(req);
+    CHECK(rec.found);
+    CHECK(rec.version == 1);
+}
+
+TEST_CASE("a version that does not exist is a pin failure, not a miss") {
+    // pin_failed is distinct from both found=false and defect. A stale pin is
+    // not absent data and not a corrupt publish -- it is a request the store
+    // cannot satisfy, and the endpoint answers 409 rather than 404 so the
+    // client's tier-1 rule does not read it as authoritative absence.
+    const std::string root = TempDir();
+    WriteCatalog(root, 165920, 1);
+    WriteIndex(root, 1);
+    WriteManifest(root, 1);
+
+    fdp::PointStore store(root, "catalog_*");
+    fdp::PointStore::Request req;
+    req.shot = 165920;
+    req.pointname = "IP";
+    req.version = 7;
+
+    const auto rec = store.Read(req);
+    CHECK_FALSE(rec.found);
+    CHECK(rec.pin_failed);
+    CHECK_FALSE(rec.defect);
+}
+
+TEST_CASE("an ordinary miss is still not a pin failure") {
+    const std::string root = TempDir();
+    WriteCatalog(root, 165920, 1);
+    WriteIndex(root, 1);
+    WriteManifest(root, 1);
+
+    fdp::PointStore store(root, "catalog_*");
+    fdp::PointStore::Request req;
+    req.shot = 999999;                  // never minted
+    req.pointname = "IP";
+
+    const auto rec = store.Read(req);
+    CHECK_FALSE(rec.found);
+    CHECK_FALSE(rec.pin_failed);
 }

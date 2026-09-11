@@ -38,6 +38,7 @@
 #include <memory>
 #include <cctype>
 #include <sstream>
+#include <map>
 #include <string>
 
 XrdVERSIONINFO(XrdHttpGetExtHandler, XrdHttpMdsip);
@@ -117,6 +118,38 @@ std::string UrlDecode(const std::string &s) {
 // index-first, where StoreIndex::resolve takes only (shot, pointname).
 // The index decides which extension holds a pointname, and the response says
 // which one answered.
+// Parse "a=1&b=two" from the query half of a request target.
+//
+// INTRODUCED here, not extended: this endpoint has never read a query
+// parameter. ?ext has always been accepted and IGNORED, because the store
+// resolves the extension itself -- so the comment above that says the query
+// string is dropped was accurate until now.
+//
+// An UNKNOWN parameter is ignored rather than rejected. Deployed clients
+// already send ?ext, and failing those requests would turn a cosmetic
+// mismatch into an outage.
+std::map<std::string, std::string> ParseQuery(const std::string &rest) {
+    std::map<std::string, std::string> out;
+    const size_t q = rest.find('?');
+    if (q == std::string::npos) return out;
+
+    std::string qs = rest.substr(q + 1);
+    size_t pos = 0;
+    while (pos < qs.size()) {
+        const size_t amp = qs.find('&', pos);
+        const std::string pair =
+            qs.substr(pos, amp == std::string::npos ? std::string::npos
+                                                    : amp - pos);
+        const size_t eq = pair.find('=');
+        if (eq != std::string::npos && eq > 0) {
+            out[pair.substr(0, eq)] = UrlDecode(pair.substr(eq + 1));
+        }
+        if (amp == std::string::npos) break;
+        pos = amp + 1;
+    }
+    return out;
+}
+
 bool SplitPointPath(const std::string &rest, std::string &shot,
                     std::string &pointname) {
     std::string path = rest;
@@ -365,7 +398,23 @@ private:
 
         fdp::PointStore::Record rec;
         try {
-            rec = points_->Read(static_cast<int>(shot), pointname);
+            fdp::PointStore::Request sreq;
+            sreq.shot = static_cast<int>(shot);
+            sreq.pointname = pointname;
+            // ?version= and ?snapshot= pin the read. A malformed version is
+            // ignored rather than refused, for the same reason an unknown
+            // parameter is: it degrades to an unpinned read, which is the
+            // behaviour every deployed client already gets.
+            const auto qs = ParseQuery(rest);
+            const auto vit = qs.find("version");
+            if (vit != qs.end()) {
+                try { sreq.version = std::stoi(vit->second); }
+                catch (const std::exception &) { sreq.version = 0; }
+            }
+            const auto sit = qs.find("snapshot");
+            if (sit != qs.end()) sreq.snapshot = sit->second;
+
+            rec = points_->Read(sreq);
         } catch (const std::exception &e) {
             // A server fault -- unreadable file, malformed header. It must not
             // reach the client as 404, or a broken origin reads as absent data
@@ -377,6 +426,15 @@ private:
             // A catalog row whose index is missing or unreadable is a defect,
             // but it must not fail requests for other shots -- so it is a loud
             // miss, not a 500. An ordinary miss stays silent.
+            // A pin that cannot be honoured is 409, never 404: the client
+            // treats a 404 from this tier as an AUTHORITATIVE miss and stops,
+            // so reusing it would make stale provenance indistinguishable from
+            // data that never existed.
+            if (rec.pin_failed)
+                return Fail(req, 409, "Conflict",
+                            "cannot honour the requested version or snapshot "
+                            "for shot " + shot_s);
+
             if (rec.defect)
                 log_->Emsg("point", "catalog names a version with no usable "
                            "index:", rec.detail.c_str());
