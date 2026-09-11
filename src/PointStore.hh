@@ -44,6 +44,25 @@ public:
         // (never minted, unknown pointname) leaves this false.
         bool        defect = false;
         std::string detail;      // what to put in that log line
+
+        // A pin the store cannot satisfy: the requested version or snapshot
+        // does not exist. Distinct from both `found` and `defect` -- it is
+        // neither absent data nor a corrupt publish, but a request about
+        // provenance that has gone stale. The endpoint answers 409 for this,
+        // never 404, because the client treats a 404 from tier 1 as
+        // authoritative absence.
+        bool        pin_failed = false;
+    };
+
+    // What to read. A struct rather than more positional arguments so a later
+    // coordinate (B7's cohort) does not change the signature again.
+    struct Request {
+        int shot = 0;
+        std::string pointname;
+        // Empty means "latest", which is the whole of today's behaviour.
+        // version = 0 means unset; a real version is >= 1.
+        int version = 0;
+        std::string snapshot;
     };
 
     // store_root: the namespace root holding catalog/ and views/, e.g.
@@ -61,6 +80,9 @@ public:
     // ordinary case and the client's provider chain advances on it. Genuine
     // failures -- unreadable shotfile, malformed header -- throw
     // ptdata::PtDataError, which the caller turns into a 500.
+    Record Read(const Request &req);
+
+    // Convenience overload for an unpinned read; delegates to the struct form.
     Record Read(int shot, const std::string &pointname);
 
     // The snapshot currently in use, for the startup banner.
