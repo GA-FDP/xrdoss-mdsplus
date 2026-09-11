@@ -277,6 +277,14 @@ if(BUILD_TESTS)
         target_compile_features(test_archiveio PRIVATE cxx_std_20)
         add_test(NAME archiveio COMMAND test_archiveio)
 
+        # Header-only: no pointcore, no ptdata. The wire contract must stay
+        # testable even in a build without BUILD_POINT, because it is the only
+        # guardrail on the 409-vs-404 agreement with the client repo.
+        add_executable(test_pointwire tests/test_pointwire.cpp)
+        target_include_directories(test_pointwire PRIVATE src ${DOCTEST_INCLUDE_DIR})
+        target_compile_features(test_pointwire PRIVATE cxx_std_14)
+        add_test(NAME pointwire COMMAND test_pointwire)
+
         add_executable(test_pointstore tests/test_pointstore.cpp $<TARGET_OBJECTS:pointcore>)
         target_include_directories(test_pointstore PRIVATE src ${PTDATA_INCLUDE_DIR}
                                    ${DOCTEST_INCLUDE_DIR})

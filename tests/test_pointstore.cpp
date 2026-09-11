@@ -224,8 +224,8 @@ TEST_CASE("CurrentSnapshot names the snapshot in use, for the banner") {
     CHECK(store.CurrentSnapshot() == kStamp);
 }
 
-TEST_CASE("a pinned version resolves to that version, not the catalog's") {
-    if (!HaveShot()) return;
+TEST_CASE("a pinned version resolves to that version, not the catalog's"
+          * doctest::skip(!HaveShot())) {
     const std::string root = TempDir();
     WriteCatalog(root, 165920, 2);      // catalog says v2 is latest
     WriteIndex(root, 1);
@@ -282,4 +282,30 @@ TEST_CASE("an ordinary miss is still not a pin failure") {
     const auto rec = store.Read(req);
     CHECK_FALSE(rec.found);
     CHECK_FALSE(rec.pin_failed);
+}
+
+TEST_CASE("a pinned version whose payload is gone is a pin failure, not a miss") {
+    // The catalog and manifest say v1 was minted; the shotfile is not there.
+    // Unpinned that is ordinary absence. Pinned it is the pin failing -- the
+    // caller asked for a version it cannot have, which must not read as
+    // "this point never existed".
+    const std::string root = TempDir();
+    WriteCatalog(root, 165920, 1);
+    WriteIndex(root, 1);
+    WriteManifest(root, 1);
+    // deliberately no LinkShotfile()
+
+    fdp::PointStore store(root, "catalog_*");
+
+    fdp::PointStore::Request pinned;
+    pinned.shot = 165920;
+    pinned.pointname = "IP";
+    pinned.version = 1;
+    const auto a = store.Read(pinned);
+    CHECK_FALSE(a.found);
+    CHECK(a.pin_failed);
+
+    const auto b = store.Read(165920, "IP");      // unpinned: ordinary miss
+    CHECK_FALSE(b.found);
+    CHECK_FALSE(b.pin_failed);
 }

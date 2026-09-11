@@ -41,6 +41,8 @@
 #include <map>
 #include <string>
 
+#include "PointWire.hh"
+
 XrdVERSIONINFO(XrdHttpGetExtHandler, XrdHttpMdsip);
 
 namespace {
@@ -93,63 +95,18 @@ std::string UrlEncode(const std::string &s) {
     return out;
 }
 
-// Percent-decode one path segment. Pointnames are uppercase alphanumerics plus
-// a little punctuation, but the client percent-encodes the segment, so decode
-// it rather than assume which characters survived.
-std::string UrlDecode(const std::string &s) {
-    std::string out;
-    out.reserve(s.size());
-    for (size_t i = 0; i < s.size(); ++i) {
-        if (s[i] == '%' && i + 2 < s.size() &&
-            std::isxdigit(static_cast<unsigned char>(s[i + 1])) &&
-            std::isxdigit(static_cast<unsigned char>(s[i + 2]))) {
-            out += static_cast<char>(std::strtol(s.substr(i + 1, 2).c_str(), 0, 16));
-            i += 2;
-        } else {
-            out += s[i];
-        }
-    }
-    return out;
-}
+// UrlDecode and ParseQuery now live in PointWire.hh, where they are unit
+// tested -- this translation unit is compiled only into the plugin module and
+// linked by no test target.
+using fdp::ParseQuery;
+using fdp::UrlDecode;
 
 // "/165920/IP?ext=.MAG" -> shot "165920", pointname "IP".
 //
-// The query string is dropped: ?ext is a hint, and resolution here is
-// index-first, where StoreIndex::resolve takes only (shot, pointname).
-// The index decides which extension holds a pointname, and the response says
-// which one answered.
-// Parse "a=1&b=two" from the query half of a request target.
-//
-// INTRODUCED here, not extended: this endpoint has never read a query
-// parameter. ?ext has always been accepted and IGNORED, because the store
-// resolves the extension itself -- so the comment above that says the query
-// string is dropped was accurate until now.
-//
-// An UNKNOWN parameter is ignored rather than rejected. Deployed clients
-// already send ?ext, and failing those requests would turn a cosmetic
-// mismatch into an outage.
-std::map<std::string, std::string> ParseQuery(const std::string &rest) {
-    std::map<std::string, std::string> out;
-    const size_t q = rest.find('?');
-    if (q == std::string::npos) return out;
-
-    std::string qs = rest.substr(q + 1);
-    size_t pos = 0;
-    while (pos < qs.size()) {
-        const size_t amp = qs.find('&', pos);
-        const std::string pair =
-            qs.substr(pos, amp == std::string::npos ? std::string::npos
-                                                    : amp - pos);
-        const size_t eq = pair.find('=');
-        if (eq != std::string::npos && eq > 0) {
-            out[pair.substr(0, eq)] = UrlDecode(pair.substr(eq + 1));
-        }
-        if (amp == std::string::npos) break;
-        pos = amp + 1;
-    }
-    return out;
-}
-
+// The query string is split off here and parsed separately by ParseQuery:
+// ?ext remains a hint the store ignores, while ?version and ?snapshot pin the
+// read. The index decides which extension holds a pointname, and the response
+// says which one answered.
 bool SplitPointPath(const std::string &rest, std::string &shot,
                     std::string &pointname) {
     std::string path = rest;
@@ -430,7 +387,7 @@ private:
             // treats a 404 from this tier as an AUTHORITATIVE miss and stops,
             // so reusing it would make stale provenance indistinguishable from
             // data that never existed.
-            if (rec.pin_failed)
+            if (fdp::StatusForRecord(rec.found, rec.pin_failed) == 409)
                 return Fail(req, 409, "Conflict",
                             "cannot honour the requested version or snapshot "
                             "for shot " + shot_s);
