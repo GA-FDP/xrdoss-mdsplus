@@ -181,8 +181,24 @@ FROM ${PELICAN_BASE}
 COPY --from=build /build/libXrdOssMdsplus-5.so /plugins/libXrdOssMdsplus-5.so
 COPY --from=build /build/libXrdHttpMdsip-5.so  /plugins/libXrdHttpMdsip-5.so
 
+# Re-declared: PELICAN_BASE, PELICAN_VERSION and PTDATA_VERSION are global
+# ARGs, declared before the first FROM. A global ARG is visible to FROM lines
+# but NOT inside a build stage unless the stage declares it again -- so
+# org.fdp.pelican.base rendered EMPTY on every image published so far, which
+# is the one label that documented what this thing derives from.
+ARG PELICAN_BASE
+ARG PELICAN_VERSION
+ARG PTDATA_VERSION
+# What this repository contributes: the only component the tag names, and the
+# only one not derivable from the other two.
+ARG PLUGIN_VERSION=0.0.0
+
 LABEL org.opencontainers.image.source="https://github.com/GA-FDP/xrdoss-mdsplus" \
       org.opencontainers.image.description="Pelican origin with the GA-FDP MDSplus OSS plugin and the mdsip relay / PTData point endpoint" \
+      org.opencontainers.image.version="${PLUGIN_VERSION}" \
+      org.fdp.plugin.version="${PLUGIN_VERSION}" \
+      org.fdp.pelican.version="${PELICAN_VERSION}" \
+      org.fdp.ptdata.version="${PTDATA_VERSION}" \
       org.fdp.pelican.base="${PELICAN_BASE}"
 
 # The config references the UNSUFFIXED name: XrdOucPinLoader appends the plugin

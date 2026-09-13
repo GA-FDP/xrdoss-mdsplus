@@ -14,7 +14,7 @@ on:
     branches:
       - main
     tags:
-      - 'image-*'
+      - 'release-*'
   pull_request:
     branches:
       - main
@@ -56,6 +56,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Tags, because the image version now comes from `git describe` on
+          # the workflow_dispatch path. The default shallow clone has none,
+          # and the failure would be a version silently reduced to a bare sha.
+          fetch-depth: 0
 
       # Read the versions from the Containerfiles rather than repeating them.
       # They were pinned in five places once; that is how they drift.
@@ -137,41 +142,31 @@ jobs:
           # Pelican at all, so a Pelican version in its tag would be a lie.
           # These are the tags deploy/*.container reference, and the scheme the
           # design spec names.
-          case "${{ matrix.name }}" in
-            origin) release="${PELICAN_VERSION}-fdp${PTDATA_VERSION}" ;;
-            mdsip)  release="${PTDATA_VERSION}" ;;
-            *) echo "::error::no tag scheme for ${{ matrix.name }}"; exit 1 ;;
-          esac
-
+          # The image is tagged with THIS repository's version, and nothing
+          # else. Both dependency versions are ARGs in the Containerfiles --
+          # PELICAN_VERSION, PTDATA_VERSION and the pinned PELICAN_BASE digest
+          # all live here -- so a commit already determines them. Repeating
+          # them in the tag was a denormalized copy that could not express the
+          # one component it omitted: our own code. Two builds could differ in
+          # the plugin and both honestly claim 7.26.0-fdp2.6.0, which is
+          # exactly how a broken point handler shipped under a name that
+          # looked unchanged.
+          #
+          # Dependencies are recorded as OCI labels instead, set from the same
+          # ARGs, so `podman inspect` answers "which Pelican is this?" without
+          # the tag having to carry it.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Honest about not being a release: an exact tag gives "0.3.1",
+            # anything else "0.3.1-3-gabc1234".
+            release="$(git describe --tags --match 'release-*' --always \
+                        | sed 's/^release-//')"
             echo "tag=$release" >> "$GITHUB_OUTPUT"
             echo "push=true" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.ref_type }}" = "tag" ]; then
-            # The git tag names the release as a whole. If it disagrees with
-            # the Containerfiles, the images would be published under one
-            # version and built from another -- fail rather than pick a winner.
-            #
-            # An optional -r<N> suffix names a REBUILD of the same dependency
-            # set: image-7.26.0-fdp2.6.0-r2 publishes 7.26.0-fdp2.6.0-r2. The
-            # base scheme names only what the image DEPENDS on -- the Pelican
-            # it derives from and the ptdata it carries -- so a fix to this
-            # repository's own server code has no way to be expressed, and two
-            # different builds can both honestly claim 7.26.0-fdp2.6.0.
-            # Re-pushing the bare tag would silently change what a name that
-            # is already deployed refers to, so the suffix is how a server-code
-            # fix ships without mutating a published tag.
-            want="${PELICAN_VERSION}-fdp${PTDATA_VERSION}"
-            got="${GITHUB_REF_NAME#image-}"
-            rev=""
-            case "$got" in
-              "$want") ;;
-              "$want"-r*) rev="${got#"$want"}" ;;
-              *) echo "::error::$GITHUB_REF_NAME does not match the Containerfiles (expected image-$want, optionally with a -r<N> suffix)"
-                 exit 1 ;;
-            esac
-            # mdsip is tagged by ptdata alone, so it carries the revision too
-            # or the pair would fall out of step.
-            echo "tag=$release$rev" >> "$GITHUB_OUTPUT"
+            release="${GITHUB_REF_NAME#release-}"
+            [ "$release" != "$GITHUB_REF_NAME" ] || {
+              echo "::error::expected a release-* tag, got $GITHUB_REF_NAME"; exit 1; }
+            echo "tag=$release" >> "$GITHUB_OUTPUT"
             echo "push=true" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
             echo "tag=main-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
@@ -188,6 +183,9 @@ jobs:
       - name: Build ${{ matrix.name }}
         run: |
           podman build -f ${{ matrix.containerfile }} \
+            --build-arg PLUGIN_VERSION="${{ steps.meta.outputs.tag }}" \
+            --build-arg PTDATA_VERSION="${PTDATA_VERSION}" \
+            --build-arg PELICAN_VERSION="${PELICAN_VERSION}" \
             -t "${REGISTRY}/${OWNER}/${{ matrix.image }}:${{ steps.meta.outputs.tag }}" .
 
       # The contract suite is the acceptance test: start the built image and
