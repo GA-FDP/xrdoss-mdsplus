@@ -32,7 +32,8 @@ inline std::string UrlDecode(const std::string &s) {
     return out;
 }
 
-// Parse "a=1&b=two" from the query half of a request target.
+// Parse "a=1&b=two" -- a RAW query string, with no leading '?'. That is the
+// shape XRootD hands an ext handler (see QueryFromHeaders below).
 //
 // This endpoint never read a query parameter before B3: ?ext was accepted and
 // IGNORED because the store resolves the extension itself. An UNKNOWN
@@ -41,12 +42,8 @@ inline std::string UrlDecode(const std::string &s) {
 //
 // Only the VALUE is decoded, not the key: every key this endpoint reads is a
 // fixed ASCII literal. If that ever stops being true, decode both.
-inline std::map<std::string, std::string> ParseQuery(const std::string &rest) {
+inline std::map<std::string, std::string> ParseQueryString(const std::string &qs) {
     std::map<std::string, std::string> out;
-    const size_t q = rest.find('?');
-    if (q == std::string::npos) return out;
-
-    const std::string qs = rest.substr(q + 1);
     size_t pos = 0;
     while (pos < qs.size()) {
         const size_t amp = qs.find('&', pos);
@@ -61,6 +58,44 @@ inline std::map<std::string, std::string> ParseQuery(const std::string &rest) {
         pos = amp + 1;
     }
     return out;
+}
+
+// Same, for a whole request target: everything after the first '?'.
+inline std::map<std::string, std::string> ParseQuery(const std::string &rest) {
+    const size_t q = rest.find('?');
+    if (q == std::string::npos) return {};
+    return ParseQueryString(rest.substr(q + 1));
+}
+
+// Where the query ACTUALLY is, for an XRootD ext handler.
+//
+// XrdHttpExtReq::resource is stripped of the query. XRootD's own header says
+// so -- "The resource specified by the request, stripped of opaque data" --
+// and XrdHttpExtReq's constructor assigns `resource = req->resource`, the
+// stripped one. It puts the query somewhere else entirely:
+//
+//     headers["xrd-http-query"]        "version=2&ext=.MAG"   (no '?')
+//     headers["xrd-http-fullresource"] "/165920/IP?version=2"
+//
+// So ParseQuery(req.resource) can only ever return nothing. That is exactly
+// how 7.26.0-fdp2.6.0 shipped: every ?version= and ?snapshot= pin was
+// silently dropped and the latest version served in its place, with a 200.
+// Nothing caught it because the parser was correct in isolation -- it was
+// being handed the wrong string.
+//
+// xrd-http-query is preferred; xrd-http-fullresource is the fallback for a
+// build that fills one and not the other.
+inline std::string QueryFromHeaders(
+        const std::map<std::string, std::string> &headers) {
+    const auto q = headers.find("xrd-http-query");
+    if (q != headers.end() && !q->second.empty()) return q->second;
+
+    const auto full = headers.find("xrd-http-fullresource");
+    if (full != headers.end()) {
+        const size_t mark = full->second.find('?');
+        if (mark != std::string::npos) return full->second.substr(mark + 1);
+    }
+    return std::string();
 }
 
 // What a record means on the wire. Extracted so the cross-repo contract is
