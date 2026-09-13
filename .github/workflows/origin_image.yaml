@@ -150,12 +150,28 @@ jobs:
             # The git tag names the release as a whole. If it disagrees with
             # the Containerfiles, the images would be published under one
             # version and built from another -- fail rather than pick a winner.
+            #
+            # An optional -r<N> suffix names a REBUILD of the same dependency
+            # set: image-7.26.0-fdp2.6.0-r2 publishes 7.26.0-fdp2.6.0-r2. The
+            # base scheme names only what the image DEPENDS on -- the Pelican
+            # it derives from and the ptdata it carries -- so a fix to this
+            # repository's own server code has no way to be expressed, and two
+            # different builds can both honestly claim 7.26.0-fdp2.6.0.
+            # Re-pushing the bare tag would silently change what a name that
+            # is already deployed refers to, so the suffix is how a server-code
+            # fix ships without mutating a published tag.
             want="${PELICAN_VERSION}-fdp${PTDATA_VERSION}"
-            if [ "${GITHUB_REF_NAME#image-}" != "$want" ]; then
-              echo "::error::$GITHUB_REF_NAME does not match the Containerfiles (expected image-$want)"
-              exit 1
-            fi
-            echo "tag=$release" >> "$GITHUB_OUTPUT"
+            got="${GITHUB_REF_NAME#image-}"
+            rev=""
+            case "$got" in
+              "$want") ;;
+              "$want"-r*) rev="${got#"$want"}" ;;
+              *) echo "::error::$GITHUB_REF_NAME does not match the Containerfiles (expected image-$want, optionally with a -r<N> suffix)"
+                 exit 1 ;;
+            esac
+            # mdsip is tagged by ptdata alone, so it carries the revision too
+            # or the pair would fall out of step.
+            echo "tag=$release$rev" >> "$GITHUB_OUTPUT"
             echo "push=true" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
             echo "tag=main-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
