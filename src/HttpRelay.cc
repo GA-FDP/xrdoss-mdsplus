@@ -99,6 +99,8 @@ std::string UrlEncode(const std::string &s) {
 // tested -- this translation unit is compiled only into the plugin module and
 // linked by no test target.
 using fdp::ParseQuery;
+using fdp::ParseQueryString;
+using fdp::QueryFromHeaders;
 using fdp::UrlDecode;
 
 // "/165920/IP?ext=.MAG" -> shot "165920", pointname "IP".
@@ -362,7 +364,10 @@ private:
             // ignored rather than refused, for the same reason an unknown
             // parameter is: it degrades to an unpinned read, which is the
             // behaviour every deployed client already gets.
-            const auto qs = ParseQuery(rest);
+            // NOT ParseQuery(rest): XrdHttpExtReq::resource is stripped
+            // of the query, so that always parsed nothing and every pin was
+            // silently dropped. The query lives in the headers.
+            const auto qs = ParseQueryString(QueryFromHeaders(req.headers));
             const auto vit = qs.find("version");
             if (vit != qs.end()) {
                 try { sreq.version = std::stoi(vit->second); }
