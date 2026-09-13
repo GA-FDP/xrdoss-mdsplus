@@ -96,6 +96,19 @@ FROM almalinux:9
 ARG MDSPLUS_VERSION=7.158-2
 ARG MDSPLUS_REPO=http://www.mdsplus.org/dist/rhel9/stable/RPMS/x86_64
 ARG MDSPLUS_NOARCH=http://www.mdsplus.org/dist/rhel9/stable/RPMS/noarch
+# The sandbox carries no Pelican -- it is built FROM almalinux:9 -- so it gets
+# no pelican labels. It does carry ptdata and this repository's source, and
+# both were previously invisible on the published image: it had no labels at
+# all.
+ARG PTDATA_VERSION
+ARG PLUGIN_VERSION=0.0.0
+
+LABEL org.opencontainers.image.source="https://github.com/GA-FDP/xrdoss-mdsplus" \
+      org.opencontainers.image.description="MDSplus mdsip sandbox for FDP, with PTData TDI functions" \
+      org.opencontainers.image.version="${PLUGIN_VERSION}" \
+      org.fdp.plugin.version="${PLUGIN_VERSION}" \
+      org.fdp.ptdata.version="${PTDATA_VERSION}" \
+      org.fdp.mdsplus.version="${MDSPLUS_VERSION}"
 
 # Three packages, and all are needed. `kernel_bin` is binaries only -- it ships
 # no `tdi/` directory at all -- while the noarch `kernel` carries the TDI
