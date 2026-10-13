@@ -385,6 +385,13 @@ TEST_CASE("socket= together with host= or port= is refused") {
     CHECK(error.find("socket=") != std::string::npos);
 }
 
+TEST_CASE("a socket= path that cannot fit sun_path is refused at resolve time") {
+    fdp::MdsipTarget t;
+    std::string error;
+    CHECK_FALSE(fdp::ResolveMdsipTarget("", "", "/" + std::string(200, 'x'), t, error));
+    CHECK(error.find("mdsip socket path too long") != std::string::npos);
+}
+
 TEST_CASE("an unusable port is refused with the text that was given") {
     fdp::MdsipTarget t;
     std::string error;

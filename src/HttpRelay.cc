@@ -32,7 +32,6 @@
 #include "XrdVersion.hh"
 
 #include <sys/stat.h>
-#include <sys/un.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -459,12 +458,6 @@ extern "C" XrdHttpExtHandler *XrdHttpGetExtHandler(XrdSysError *eDest,
                                  ParmValue(parms, "socket", ""),
                                  target, target_error)) {
         eDest->Emsg("relay", "refusing to load:", target_error.c_str());
-        return 0;
-    }
-    if (!target.socket_path.empty()
-        && target.socket_path.size() >= sizeof(sockaddr_un::sun_path)) {
-        eDest->Emsg("relay", "refusing to load: mdsip socket path too long",
-                    target.socket_path.c_str());
         return 0;
     }
     const int idle             = std::atoi(ParmValue(parms, "idle", "300").c_str());

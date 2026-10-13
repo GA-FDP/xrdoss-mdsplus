@@ -84,6 +84,10 @@ bool ResolveMdsipTarget(const std::string &host_parm,
             error = "socket= cannot be combined with host= or port=";
             return false;
         }
+        if (socket_parm.size() >= sizeof(sockaddr_un::sun_path)) {
+            error = "mdsip socket path too long: " + socket_parm;
+            return false;
+        }
         out.socket_path = socket_parm;
         return true;
     }
