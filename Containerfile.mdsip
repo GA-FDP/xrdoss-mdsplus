@@ -277,6 +277,10 @@ RUN set -eux; \
     `# shared tree state again, silently and only under concurrency.` \
     grep -q 'fork,reuseaddr' /usr/local/bin/fdp-mdsip-server; \
     grep -q 'nofork' /usr/local/bin/fdp-mdsip-server; \
+    `# Both listener forms must carry fork+nofork: the Unix form is what` \
+    `# production runs, the TCP form what the tests and the default run.` \
+    grep -q 'UNIX-LISTEN:\$FDP_MDSIP_SOCKET,fork,unlink-early' /usr/local/bin/fdp-mdsip-server; \
+    [ "$(grep -c 'EXEC:/usr/local/bin/fdp-mdsip-connection,nofork' /usr/local/bin/fdp-mdsip-server)" = 2 ]; \
     `# The Pelican-path chain resolves relative to the working directory, so` \
     `# losing this line breaks every ptdata lookup and nothing else.` \
     grep -q '^cd /$' /usr/local/bin/fdp-mdsip-connection; \
