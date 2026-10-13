@@ -393,6 +393,19 @@ TEST_CASE("an unusable port is refused with the text that was given") {
     CHECK_FALSE(fdp::ResolveMdsipTarget("", "eighty", "", t, error));
 }
 
+TEST_CASE("the port parse is exact at both ends of the range and refuses trailing text") {
+    fdp::MdsipTarget t;
+    std::string error;
+    REQUIRE(fdp::ResolveMdsipTarget("", "1", "", t, error));
+    CHECK(t.port == 1);
+    REQUIRE(fdp::ResolveMdsipTarget("", "65535", "", t, error));
+    CHECK(t.port == 65535);
+    CHECK_FALSE(fdp::ResolveMdsipTarget("", "0", "", t, error));
+    CHECK_FALSE(fdp::ResolveMdsipTarget("", "65536", "", t, error));
+    CHECK_FALSE(fdp::ResolveMdsipTarget("", "80abc", "", t, error));
+    CHECK(error.find("80abc") != std::string::npos);
+}
+
 TEST_CASE("a relayed call over a Unix socket returns exactly one answer") {
     const std::string path = TestSocketPath();
     FakeMdsip server(path);
