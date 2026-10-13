@@ -321,3 +321,48 @@ TEST_CASE("concurrent calls on one session are refused, not interleaved") {
     CHECK(succeeded + refused == 8);
     CHECK(succeeded >= 1);
 }
+
+TEST_CASE("the mdsip target defaults to localhost:8000 over TCP") {
+    fdp::MdsipTarget t;
+    std::string error;
+    REQUIRE(fdp::ResolveMdsipTarget("", "", "", t, error));
+    CHECK(t.socket_path.empty());
+    CHECK(t.host == "localhost");
+    CHECK(t.port == 8000);
+}
+
+TEST_CASE("host= and port= name a TCP target") {
+    fdp::MdsipTarget t;
+    std::string error;
+    REQUIRE(fdp::ResolveMdsipTarget("10.88.0.1", "8100", "", t, error));
+    CHECK(t.socket_path.empty());
+    CHECK(t.host == "10.88.0.1");
+    CHECK(t.port == 8100);
+}
+
+TEST_CASE("socket= names a Unix target and leaves host and port unset") {
+    fdp::MdsipTarget t;
+    std::string error;
+    REQUIRE(fdp::ResolveMdsipTarget("", "", "/run/fdp-mdsip/mdsip.sock", t, error));
+    CHECK(t.socket_path == "/run/fdp-mdsip/mdsip.sock");
+    CHECK(t.host.empty());
+    CHECK(t.port == 0);
+}
+
+TEST_CASE("socket= together with host= or port= is refused") {
+    fdp::MdsipTarget t;
+    std::string error;
+    CHECK_FALSE(fdp::ResolveMdsipTarget("localhost", "", "/run/x.sock", t, error));
+    CHECK(error.find("socket=") != std::string::npos);
+    error.clear();
+    CHECK_FALSE(fdp::ResolveMdsipTarget("", "8000", "/run/x.sock", t, error));
+    CHECK(error.find("socket=") != std::string::npos);
+}
+
+TEST_CASE("an unusable port is refused with the text that was given") {
+    fdp::MdsipTarget t;
+    std::string error;
+    CHECK_FALSE(fdp::ResolveMdsipTarget("", "70000", "", t, error));
+    CHECK(error.find("70000") != std::string::npos);
+    CHECK_FALSE(fdp::ResolveMdsipTarget("", "eighty", "", t, error));
+}

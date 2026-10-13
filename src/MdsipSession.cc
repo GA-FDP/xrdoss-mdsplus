@@ -9,6 +9,7 @@
 
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 
@@ -69,6 +70,35 @@ size_t MdsipMessageLength(const std::string &hdr) {
     if (len < kMdsipHeaderBytes) return 0;
     if (len > (1u << 31)) return 0;      // 2 GiB ceiling; MDSplus caps at 4 GiB
     return len;
+}
+
+bool ResolveMdsipTarget(const std::string &host_parm,
+                        const std::string &port_parm,
+                        const std::string &socket_parm,
+                        MdsipTarget &out, std::string &error) {
+    out = MdsipTarget();
+    error.clear();
+    if (!socket_parm.empty()) {
+        if (!host_parm.empty() || !port_parm.empty()) {
+            error = "socket= cannot be combined with host= or port=";
+            return false;
+        }
+        out.socket_path = socket_parm;
+        return true;
+    }
+    out.host = host_parm.empty() ? std::string("localhost") : host_parm;
+    if (port_parm.empty()) {
+        out.port = 8000;
+        return true;
+    }
+    char *end = 0;
+    const long port = std::strtol(port_parm.c_str(), &end, 10);
+    if (!end || *end != '\0' || port <= 0 || port > 65535) {
+        error = "invalid mdsip port " + port_parm;
+        return false;
+    }
+    out.port = static_cast<int>(port);
+    return true;
 }
 
 bool ReadOneMessage(int fd, std::string &out, int timeout_ms) {

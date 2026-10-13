@@ -8,6 +8,25 @@
 
 namespace fdp {
 
+// Where the relay finds mdsip: a TCP host and port, or a Unix socket path.
+// The exthandler line names one form or the other. The Unix form exists
+// because the production sandbox is a rootless container: a TCP hop into it
+// crosses pasta, which stalls every reply above ~4 MB for a full
+// retransmission timeout (measured 2026-10-13, d3d-origin-admin
+// docs/specs/2026-10-13-mdsip-unix-socket-design.md).
+struct MdsipTarget {
+    std::string host;         // TCP form
+    int         port = 0;     // TCP form
+    std::string socket_path;  // Unix form; empty means TCP
+};
+
+// Raw parameter strings as the directive gave them, "" where it did not.
+// Fills `out`, or sets `error` and returns false.
+bool ResolveMdsipTarget(const std::string &host_parm,
+                        const std::string &port_parm,
+                        const std::string &socket_parm,
+                        MdsipTarget &out, std::string &error);
+
 // Holds one mdsip TCP connection per client session.
 //
 // This exists because mdsip is STATEFUL: openTree sets the tree context on the
