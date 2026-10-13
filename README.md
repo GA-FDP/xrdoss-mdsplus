@@ -266,7 +266,7 @@ existing HTTPS port, TLS and SciTokens.
         │  HTTPS
         ▼
   XRootD :443 ── XrdHttpMdsip     holds one mdsip socket per session
-        │  mdsip over TCP
+        │  mdsip over TCP or a Unix socket
         ▼
   mdsip server (sandboxed)        does the actual work
 ```
@@ -376,8 +376,9 @@ origin: rootless podman maps container uid 0 to the invoking user, so sharing
 the account makes container-root the owner of the issuer keys.
 [`deploy/fdp-mdsip.container`](deploy/fdp-mdsip.container) is the quadlet unit
 for that; `docs/security.md` has the account setup and one consequence worth
-knowing — the two containers can no longer share a podman network, so the relay
-must reach mdsip via `host.containers.internal`.
+knowing — the two containers can no longer share a podman network, so in TCP mode the
+relay must reach mdsip via `host.containers.internal`; production avoids the hop
+entirely with `socket=` (above).
 
 `tests/security/verify_sandbox.sh` asserts each control by attacking it through
 ordinary TDI, the same channel a client has. It first confirms the client
