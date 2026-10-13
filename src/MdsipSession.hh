@@ -39,6 +39,9 @@ bool ResolveMdsipTarget(const std::string &host_parm,
 // times out.
 class MdsipSessions {
 public:
+    MdsipSessions(const MdsipTarget &target, int idle_seconds,
+                  size_t max_sessions, int timeout_ms);
+    // The TCP form, kept for callers and tests that name a host and port.
     MdsipSessions(std::string host, int port, int idle_seconds,
                   size_t max_sessions, int timeout_ms);
 
@@ -83,8 +86,7 @@ private:
     // relayer if one holds the fd.
     void Retire(const std::map<std::string, Session>::iterator &it);
 
-    std::string host_;
-    int         port_;
+    MdsipTarget target_;
     int         idle_seconds_;
     size_t      max_sessions_;
     int         timeout_ms_;

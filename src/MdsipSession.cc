@@ -5,6 +5,7 @@
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -124,10 +125,24 @@ bool ReadOneMessage(int fd, std::string &out, int timeout_ms) {
     return true;
 }
 
+MdsipSessions::MdsipSessions(const MdsipTarget &target, int idle_seconds,
+                             size_t max_sessions, int timeout_ms)
+    : target_(target), idle_seconds_(idle_seconds),
+      max_sessions_(max_sessions), timeout_ms_(timeout_ms) {}
+
+namespace {
+MdsipTarget TcpTarget(std::string host, int port) {
+    MdsipTarget t;
+    t.host = std::move(host);
+    t.port = port;
+    return t;
+}
+}  // namespace
+
 MdsipSessions::MdsipSessions(std::string host, int port, int idle_seconds,
                              size_t max_sessions, int timeout_ms)
-    : host_(std::move(host)), port_(port), idle_seconds_(idle_seconds),
-      max_sessions_(max_sessions), timeout_ms_(timeout_ms) {}
+    : MdsipSessions(TcpTarget(std::move(host), port), idle_seconds,
+                    max_sessions, timeout_ms) {}
 
 MdsipSessions::~MdsipSessions() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -155,34 +170,59 @@ std::string MdsipSessions::Open(std::string &error) {
         }
     }
 
-    char portbuf[16];
-    std::snprintf(portbuf, sizeof(portbuf), "%d", port_);
-
-    addrinfo hints;
-    std::memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    addrinfo *res = 0;
-    if (::getaddrinfo(host_.c_str(), portbuf, &hints, &res) != 0 || !res) {
-        error = "cannot resolve mdsip host " + host_;
-        return std::string();
-    }
-
     int fd = -1;
-    for (addrinfo *ai = res; ai; ai = ai->ai_next) {
-        fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) continue;
-        if (::connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
-        ::close(fd);
-        fd = -1;
+    if (!target_.socket_path.empty()) {
+        // One connect, no name resolution, no Nagle to disable: a Unix socket
+        // has neither. The path length check is the only way this can be
+        // misconfigured, and it is caught at load as well as here.
+        sockaddr_un addr;
+        std::memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        if (target_.socket_path.size() >= sizeof(addr.sun_path)) {
+            error = "mdsip socket path too long: " + target_.socket_path;
+            return std::string();
+        }
+        std::strncpy(addr.sun_path, target_.socket_path.c_str(),
+                     sizeof(addr.sun_path) - 1);
+        fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd >= 0 && ::connect(fd, reinterpret_cast<sockaddr *>(&addr),
+                                 sizeof(addr)) != 0) {
+            ::close(fd);
+            fd = -1;
+        }
+        if (fd < 0) {
+            error = "cannot connect to mdsip at " + target_.socket_path;
+            return std::string();
+        }
+    } else {
+        char portbuf[16];
+        std::snprintf(portbuf, sizeof(portbuf), "%d", target_.port);
+
+        addrinfo hints;
+        std::memset(&hints, 0, sizeof(hints));
+        hints.ai_family   = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+
+        addrinfo *res = 0;
+        if (::getaddrinfo(target_.host.c_str(), portbuf, &hints, &res) != 0 || !res) {
+            error = "cannot resolve mdsip host " + target_.host;
+            return std::string();
+        }
+        for (addrinfo *ai = res; ai; ai = ai->ai_next) {
+            fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+            if (fd < 0) continue;
+            if (::connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+            ::close(fd);
+            fd = -1;
+        }
+        ::freeaddrinfo(res);
+        if (fd < 0) {
+            error = "cannot connect to mdsip at " + target_.host;
+            return std::string();
+        }
+        const int one = 1;
+        ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     }
-    ::freeaddrinfo(res);
-
-    if (fd < 0) { error = "cannot connect to mdsip at " + host_; return std::string(); }
-
-    const int one = 1;
-    ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
     const std::string token = RandomToken();
     if (token.empty()) { ::close(fd); error = "cannot generate a session token"; return std::string(); }

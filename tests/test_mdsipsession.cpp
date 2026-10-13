@@ -4,6 +4,7 @@
 
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -30,6 +31,10 @@ std::string Message(const std::string &body) {
 
 std::string BodyOf(const std::string &msg) {
     return msg.substr(fdp::kMdsipHeaderBytes);
+}
+
+std::string TestSocketPath() {
+    return "/tmp/fdp-relay-test-" + std::to_string(::getpid()) + ".sock";
 }
 
 // Stands in for mdsip: accepts connections and, per connection, echoes each
@@ -59,10 +64,30 @@ public:
         acceptor_ = std::thread(&FakeMdsip::Accept, this);
     }
 
+    explicit FakeMdsip(const std::string &unix_path)
+        : listen_fd_(-1), port_(0), stop_(false), connections_(0),
+          unix_path_(unix_path) {
+        ::unlink(unix_path.c_str());
+        listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        REQUIRE(listen_fd_ >= 0);
+
+        sockaddr_un addr;
+        std::memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        REQUIRE(unix_path.size() < sizeof(addr.sun_path));
+        std::strncpy(addr.sun_path, unix_path.c_str(), sizeof(addr.sun_path) - 1);
+        REQUIRE(::bind(listen_fd_, reinterpret_cast<sockaddr *>(&addr),
+                       sizeof(addr)) == 0);
+        REQUIRE(::listen(listen_fd_, 16) == 0);
+
+        acceptor_ = std::thread(&FakeMdsip::Accept, this);
+    }
+
     ~FakeMdsip() {
         stop_ = true;
         if (listen_fd_ >= 0) ::shutdown(listen_fd_, SHUT_RDWR);
         if (listen_fd_ >= 0) ::close(listen_fd_);
+        if (!unix_path_.empty()) ::unlink(unix_path_.c_str());
         if (acceptor_.joinable()) acceptor_.join();
 
         // Wake the per-connection readers rather than letting each burn its
@@ -117,6 +142,7 @@ private:
     std::vector<std::thread> workers_;
     std::mutex               mutex_;
     std::vector<int>         clients_;
+    std::string              unix_path_;
 };
 
 }  // namespace
@@ -365,4 +391,34 @@ TEST_CASE("an unusable port is refused with the text that was given") {
     CHECK_FALSE(fdp::ResolveMdsipTarget("", "70000", "", t, error));
     CHECK(error.find("70000") != std::string::npos);
     CHECK_FALSE(fdp::ResolveMdsipTarget("", "eighty", "", t, error));
+}
+
+TEST_CASE("a relayed call over a Unix socket returns exactly one answer") {
+    const std::string path = TestSocketPath();
+    FakeMdsip server(path);
+    fdp::MdsipTarget target;
+    target.socket_path = path;
+    fdp::MdsipSessions sessions(target, 300, 0, 5000);
+
+    std::string error;
+    const std::string token = sessions.Open(error);
+    REQUIRE_MESSAGE(!token.empty(), error);
+
+    std::string answer;
+    REQUIRE(sessions.Relay(token, Message("hello"), answer, error));
+    CHECK(BodyOf(answer) == "HELLO");
+    CHECK(server.connections() == 1);
+    sessions.Close(token);
+}
+
+TEST_CASE("a Unix target with no socket behind it fails to open, naming the path") {
+    const std::string path = TestSocketPath() + ".absent";
+    fdp::MdsipTarget target;
+    target.socket_path = path;
+    fdp::MdsipSessions sessions(target, 300, 0, 5000);
+
+    std::string error;
+    const std::string token = sessions.Open(error);
+    CHECK(token.empty());
+    CHECK(error.find("cannot connect to mdsip at " + path) != std::string::npos);
 }
