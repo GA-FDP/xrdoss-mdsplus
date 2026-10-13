@@ -208,6 +208,9 @@ only ever choose which origin a session starts on.
 
 ### Getting the relay to the sandbox: the hop that needs thought
 
+This is the TCP mode, used when `MDSIP_SOCKET` is blank; production uses the
+Unix socket described under the directive below and publishes nothing.
+
 The origin container publishes ports (`-p 8000:8000 -p 8443:8443`) rather than
 using host networking, so it is on a podman bridge. Two consequences:
 
@@ -263,7 +266,8 @@ an unprivileged subuid, which is a better mapping than the rootless default.
 ### What has to change on the origin
 
 1. **Two bind mounts** into the origin container: the `.so`, and a config
-   fragment.
+   fragment. Socket mode adds a third, the socket directory, mounted into both
+   containers.
 2. **`Xrootd.ConfigFile`** in the Pelican config pointing at that fragment.
    Pelican allows one, so if it is already in use the fragment has to merge with
    what is there.
