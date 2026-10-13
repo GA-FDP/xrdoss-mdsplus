@@ -73,6 +73,11 @@ trap cleanup EXIT
 
 fail() { echo "FAIL: $1"; echo "--- xrootd log ---"; tail -40 "$WORK/xrootd.log" 2>/dev/null; exit 1; }
 
+# The sandbox runs the container on TCP, so pairing it with a socket would
+# exercise the host stand-in while looking like the container topology.
+if [ -n "$SOCKET" ] && [ -n "${MDSIP_SANDBOX:-}" ]; then
+  fail "RELAY_SOCKET with MDSIP_SANDBOX would test the stand-in, not the container; give mdsip-sandbox.sh a socket mode first"
+fi
 if [ -n "$SOCKET" ]; then
   sed -i "s#host=127.0.0.1,port=$MDSIP_PORT#socket=$SOCKET#" "$CFG"
   grep -q "socket=$SOCKET" "$CFG" || fail "could not render socket= into the config"
@@ -107,6 +112,7 @@ if [ -n "$SOCKET" ]; then
     python "$ROOT/tests/mdsip_inetd.py" "$SOCKET" "$WORK/mdsip.hosts" \
     > "$WORK/inetd.log" 2>&1 & INETD_PID=$!
   for _ in $(seq 1 100); do
+    kill -0 "$INETD_PID" 2>/dev/null || fail "the Unix-socket mdsip exited: $(cat "$WORK/inetd.log")"
     [ -S "$SOCKET" ] && break
     sleep 0.1
   done
@@ -216,9 +222,11 @@ PYEOF
       # In socket mode the relay's sessions land on the Unix-served mdsip,
       # whose -p is the nominal 8000, so count those instead.
       if [ -n "$SOCKET" ]; then
-        pgrep -c -f "mdsip -p 8000 -h $WORK/mdsip.hosts" 2>/dev/null || echo 0
+        n="$(pgrep -c -f "mdsip -p 8000 -h $WORK/mdsip.hosts" 2>/dev/null)" || true
+        echo "${n:-0}"
       else
-        pgrep -c -f "mdsip -p $MDSIP_PORT" 2>/dev/null || echo 0
+        n="$(pgrep -c -f "mdsip -p $MDSIP_PORT" 2>/dev/null)" || true
+        echo "${n:-0}"
       fi
     fi
   }
