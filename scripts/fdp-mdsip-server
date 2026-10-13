@@ -17,6 +17,7 @@
 #   mode=666      any local process may connect -- the same reachability as the
 #                 bridge-address TCP port had; the directory's 0711 keeps it
 #                 unlistable (d3d-origin-admin docs/specs/2026-10-13-mdsip-unix-socket-design.md)
+#   The path is a socat address: it must contain no comma or colon.
 if [ -n "${FDP_MDSIP_SOCKET:-}" ]; then
   exec /usr/bin/socat "UNIX-LISTEN:$FDP_MDSIP_SOCKET,fork,unlink-early,mode=666" \
        EXEC:/usr/local/bin/fdp-mdsip-connection,nofork

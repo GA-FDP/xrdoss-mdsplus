@@ -45,6 +45,8 @@ def main():
         port = 8000                     # nominal: mdsip never binds it here
         where = target
     else:
+        if not target.isdigit():
+            sys.exit("first argument must be a TCP port or an absolute socket path")
         port = int(target)
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

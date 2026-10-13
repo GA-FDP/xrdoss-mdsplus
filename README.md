@@ -21,6 +21,12 @@ ofs.osslib ++ /path/to/libXrdOssMdsplus.so prefix=/tdi server=localhost:8000
 http.exthandler mdsip /path/to/libXrdHttpMdsip.so prefix=/mdsip,host=localhost,port=8000,auth=xrootd
 ```
 
+```
+# Production: the sandbox is rootless, so the relay reaches it over a Unix socket
+# rather than a TCP hop through pasta (which stalls replies above ~4 MB):
+http.exthandler mdsip /path/to/libXrdHttpMdsip.so prefix=/mdsip,socket=/run/fdp-mdsip/mdsip.sock,auth=xrootd
+```
+
 Note that neither name in the config carries the **`-5` suffix** the files on
 disk do: XRootD appends the plugin version itself, and referencing the suffixed
 name makes it search for `-5-5.so` and only succeed via a fallback. The client
@@ -292,6 +298,12 @@ Loaded alongside the osslib, again with the **unsuffixed** name:
 
 ```
 http.exthandler mdsip /path/to/libXrdHttpMdsip.so prefix=/mdsip,host=localhost,port=8000,auth=xrootd
+```
+
+```
+# Production: the sandbox is rootless, so the relay reaches it over a Unix socket
+# rather than a TCP hop through pasta (which stalls replies above ~4 MB):
+http.exthandler mdsip /path/to/libXrdHttpMdsip.so prefix=/mdsip,socket=/run/fdp-mdsip/mdsip.sock,auth=xrootd
 ```
 
 Parms are a single `XrdOucStream::GetWord()` token, so they **cannot contain
