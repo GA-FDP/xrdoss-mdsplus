@@ -8,7 +8,26 @@
 
 namespace fdp {
 
-// Holds one mdsip TCP connection per client session.
+// Where the relay finds mdsip: a TCP host and port, or a Unix socket path.
+// The exthandler line names one form or the other. The Unix form exists
+// because the production sandbox is a rootless container: a TCP hop into it
+// crosses pasta, which stalls every reply above ~4 MB for a full
+// retransmission timeout (measured 2026-10-13, d3d-origin-admin
+// docs/specs/2026-10-13-mdsip-unix-socket-design.md).
+struct MdsipTarget {
+    std::string host;         // TCP form
+    int         port = 0;     // TCP form
+    std::string socket_path;  // Unix form; empty means TCP
+};
+
+// Raw parameter strings as the directive gave them, "" where it did not.
+// Fills `out`, or sets `error` and returns false.
+bool ResolveMdsipTarget(const std::string &host_parm,
+                        const std::string &port_parm,
+                        const std::string &socket_parm,
+                        MdsipTarget &out, std::string &error);
+
+// Holds one mdsip connection (TCP or Unix socket) per client session.
 //
 // This exists because mdsip is STATEFUL: openTree sets the tree context on the
 // connection. A relay that opened a fresh mdsip connection per HTTP request
@@ -20,6 +39,9 @@ namespace fdp {
 // times out.
 class MdsipSessions {
 public:
+    MdsipSessions(const MdsipTarget &target, int idle_seconds,
+                  size_t max_sessions, int timeout_ms);
+    // The TCP form, kept for callers and tests that name a host and port.
     MdsipSessions(std::string host, int port, int idle_seconds,
                   size_t max_sessions, int timeout_ms);
 
@@ -64,8 +86,7 @@ private:
     // relayer if one holds the fd.
     void Retire(const std::map<std::string, Session>::iterator &it);
 
-    std::string host_;
-    int         port_;
+    MdsipTarget target_;
     int         idle_seconds_;
     size_t      max_sessions_;
     int         timeout_ms_;

@@ -281,6 +281,26 @@ its production shape:
 http.exthandler mdsip /plugins/libXrdHttpMdsip.so prefix=/mdsip,host=<mdsip-host>,port=8000,auth=xrootd,authpath=/fdp-d3d/archives
 ```
 
+**Unix socket (production).** `socket=/run/fdp-mdsip/mdsip.sock` replaces
+`host=` and `port=`; naming both is refused at load. The `fdp-mdsip` container
+listens there when `FDP_MDSIP_SOCKET` is set (`scripts/fdp-mdsip-server`) and
+runs with `Network=none`; the directory is a host tmpfs bind-mounted into both
+containers. Measured reason: through pasta every reply above ~4 MB waited out a
+200 ms retransmission timeout (d3d-origin-admin
+`docs/specs/2026-10-13-mdsip-unix-socket-design.md`).
+
+Three things to know when operating it:
+
+- The directive's parameters are one comma-separated token, so a socket path
+  cannot contain a comma or whitespace. `d3d-origin-admin` renders a fixed
+  value; nothing else should.
+- `port=` is strict: `port=80abc`, which `atoi` used to read as 80, is now
+  refused at load with the text that was given.
+- mdsip logs the peer of each connection into `/tmp/mdsip.access` by reading
+  `getpeername` into a `sockaddr_in`. An `AF_UNIX` peer fills only the family,
+  so those lines show a meaningless IPv4 address. The hosts-file match
+  (`* | MAP_TO_LOCAL`) is unaffected; do not chase that address as a client.
+
 Note the **unsuffixed** library name: XRootD appends the plugin version itself.
 
 ### Checks worth doing before the change

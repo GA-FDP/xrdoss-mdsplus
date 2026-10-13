@@ -143,7 +143,7 @@ std::string HeaderValue(std::map<std::string, std::string> &headers,
 class HttpMdsipRelay : public XrdHttpExtHandler {
 public:
     HttpMdsipRelay(XrdSysError *log, const std::string &prefix,
-                   const std::string &host, int port, int idle,
+                   const fdp::MdsipTarget &target, int idle,
                    size_t max_sessions, int timeout_ms,
                    XrdSfsFileSystem *sfs, const std::string &authpath,
                    const std::string &point_prefix,
@@ -152,7 +152,7 @@ public:
         : log_(log), prefix_(prefix), sfs_(sfs), authpath_(authpath),
           point_prefix_(point_prefix), point_authpath_(point_authpath),
           points_(points),
-          sessions_(host, port, idle, max_sessions, timeout_ms) {}
+          sessions_(target, idle, max_sessions, timeout_ms) {}
 
     bool MatchesPath(const char *verb, const char *path) {
         if (!path || !verb) return false;
@@ -451,19 +451,20 @@ extern "C" XrdHttpExtHandler *XrdHttpGetExtHandler(XrdSysError *eDest,
     (void)confg;
 
     const std::string prefix   = ParmValue(parms, "prefix", "/mdsip");
-    const std::string host     = ParmValue(parms, "host", "localhost");
-    const std::string port_str = ParmValue(parms, "port", "8000");
-    const int port             = std::atoi(port_str.c_str());
+    fdp::MdsipTarget target;
+    std::string target_error;
+    if (!fdp::ResolveMdsipTarget(ParmValue(parms, "host", ""),
+                                 ParmValue(parms, "port", ""),
+                                 ParmValue(parms, "socket", ""),
+                                 target, target_error)) {
+        eDest->Emsg("relay", "refusing to load:", target_error.c_str());
+        return 0;
+    }
     const int idle             = std::atoi(ParmValue(parms, "idle", "300").c_str());
     const int timeout_ms =
         std::atoi(ParmValue(parms, "timeout", "60").c_str()) * 1000;
     const size_t max_sessions =
         std::strtoul(ParmValue(parms, "maxsessions", "256").c_str(), 0, 10);
-
-    if (port <= 0 || port > 65535) {
-        eDest->Emsg("relay", "invalid mdsip port", port_str.c_str());
-        return 0;
-    }
 
     // An XrdHttpExtHandler runs BEFORE XRootD's authorization. XrdHttpReq.cc
     // dispatches at reqstate == 0, ahead of the file-access path where
@@ -599,10 +600,13 @@ extern "C" XrdHttpExtHandler *XrdHttpGetExtHandler(XrdSysError *eDest,
         eDest->Say("++++++ XrdHttpMdsip point endpoint: ", pbanner.c_str());
     }
 
-    const std::string banner = prefix + " -> mdsip " + host + ":" + port_str;
+    const std::string where = target.socket_path.empty()
+        ? target.host + ":" + std::to_string(target.port)
+        : "unix:" + target.socket_path;
+    const std::string banner = prefix + " -> mdsip " + where;
     eDest->Say("++++++ XrdHttpMdsip relay: ", banner.c_str());
 
-    return new HttpMdsipRelay(eDest, prefix, host, port, idle, max_sessions,
+    return new HttpMdsipRelay(eDest, prefix, target, idle, max_sessions,
                               timeout_ms, sfs, authpath,
                               point_prefix, point_authpath, points);
 }

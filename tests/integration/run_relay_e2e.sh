@@ -16,6 +16,10 @@ PORT=${RELAY_PORT:-10950}
 HTTP_PORT=${RELAY_HTTP_PORT:-10951}
 MDSIP_PORT=${RELAY_MDSIP_PORT:-8110}
 SHIM_PORT=${RELAY_SHIM_PORT:-10952}
+# RELAY_SOCKET=/short/path runs the relay against a Unix socket as production
+# does; the TCP mdsip still starts, because relay_client_check.py compares a
+# relayed session against a direct one.
+SOCKET=${RELAY_SOCKET:-}
 TREES=${FDP_TREES:-/tmp/fdp-trees}
 
 RELAY="$ROOT/build/libXrdHttpMdsip.so"        # unsuffixed on purpose
@@ -56,8 +60,11 @@ sed -e "s#@@RELAY@@#$RELAY#" -e "s#@@MDSIP@@#$MDSIP_PORT#" \
     -e "s#@@HTTPPORT@@#$HTTP_PORT#" -e "s#@@PORT@@#$PORT#" -e "s#@@WORK@@#$WORK#" \
     "$ROOT/tests/integration/xrootd-relay.cfg" > "$CFG"
 
-MDSIP_PID=""; XRD_PID=""; SHIM_PID=""
+MDSIP_PID=""; XRD_PID=""; SHIM_PID=""; INETD_PID=""
 cleanup() {
+  [ -n "$INETD_PID" ] && kill "$INETD_PID" 2>/dev/null || true
+  # The stand-in does not unlink its socket on exit, so a run would leave it.
+  [ -n "$SOCKET" ] && rm -f "$SOCKET" 2>/dev/null || true
   [ -n "$SHIM_PID"  ] && kill "$SHIM_PID"  2>/dev/null || true
   [ -n "$XRD_PID"   ] && kill "$XRD_PID"   2>/dev/null || true
   [ -n "$MDSIP_PID" ] && kill "$MDSIP_PID" 2>/dev/null || true
@@ -65,6 +72,16 @@ cleanup() {
 trap cleanup EXIT
 
 fail() { echo "FAIL: $1"; echo "--- xrootd log ---"; tail -40 "$WORK/xrootd.log" 2>/dev/null; exit 1; }
+
+# The sandbox runs the container on TCP, so pairing it with a socket would
+# exercise the host stand-in while looking like the container topology.
+if [ -n "$SOCKET" ] && [ -n "${MDSIP_SANDBOX:-}" ]; then
+  fail "RELAY_SOCKET with MDSIP_SANDBOX would test the stand-in, not the container; give mdsip-sandbox.sh a socket mode first"
+fi
+if [ -n "$SOCKET" ]; then
+  sed -i "s#host=127.0.0.1,port=$MDSIP_PORT#socket=$SOCKET#" "$CFG"
+  grep -q "socket=$SOCKET" "$CFG" || fail "could not render socket= into the config"
+fi
 
 # MDSIP_SANDBOX=1 runs the relay against the containerised mdsip instead of a
 # bare one on the host -- the production topology, where a client's code
@@ -87,6 +104,21 @@ else
   start_mdsip "$MDSIP_PORT" "$TREES" "$WORK"
 fi
 
+# The Unix-socket mdsip, with the same trees and TDI path start_mdsip gives the
+# TCP one. The sandbox path does not write the hosts file, so write it here.
+if [ -n "$SOCKET" ]; then
+  [ -f "$WORK/mdsip.hosts" ] || printf '* | MAP_TO_LOCAL\n' > "$WORK/mdsip.hosts"
+  MDS_PATH="$CONDA_PREFIX/tdi;$CONDA_PREFIX/tdi/remote" efit01_path="$TREES" \
+    python "$ROOT/tests/mdsip_inetd.py" "$SOCKET" "$WORK/mdsip.hosts" \
+    > "$WORK/inetd.log" 2>&1 & INETD_PID=$!
+  for _ in $(seq 1 100); do
+    kill -0 "$INETD_PID" 2>/dev/null || fail "the Unix-socket mdsip exited: $(cat "$WORK/inetd.log")"
+    [ -S "$SOCKET" ] && break
+    sleep 0.1
+  done
+  [ -S "$SOCKET" ] || fail "the Unix-socket mdsip never listened: $(cat "$WORK/inetd.log")"
+fi
+
 xrootd -c "$CFG" -l "$WORK/xrootd.log" >/dev/null 2>&1 & XRD_PID=$!
 for _ in $(seq 1 150); do
   kill -0 "$XRD_PID" 2>/dev/null || fail "xrootd exited during startup"
@@ -101,6 +133,11 @@ done
 grep -q "XrdHttpMdsip relay" "$WORK/xrootd.log" || fail "the relay handler was never loaded"
 echo "--- 0. handler loaded ---"
 grep "XrdHttpMdsip relay" "$WORK/xrootd.log" | tail -1
+if [ -n "$SOCKET" ]; then
+  grep -q "mdsip unix:$SOCKET" "$WORK/xrootd.log" || fail "banner does not name the Unix socket"
+else
+  grep -q "mdsip 127.0.0.1:$MDSIP_PORT" "$WORK/xrootd.log" || fail "banner does not name the TCP target"
+fi
 
 python "$ROOT/tests/integration/mdsip_http_client.py" \
        "$SHIM_PORT" "127.0.0.1:$HTTP_PORT" /mdsip > "$WORK/shim.log" 2>&1 & SHIM_PID=$!
@@ -155,6 +192,21 @@ else
     python "$ROOT/tests/integration/relay_client_check.py" \
     || fail "the C transport did not match the direct connection"
 
+  echo "--- 6b. a multi-megabyte reply is not stalled ---"
+  LD_LIBRARY_PATH="$ROOT/build:${LD_LIBRARY_PATH:-}" FDP_TUNNEL_SCHEME=http \
+  python - "$HTTP_PORT" <<'PYEOF' || fail "large replies stall through the relay"
+import sys, time
+from MDSplus import Connection
+c = Connection("fdp://127.0.0.1:%s/mdsip" % sys.argv[1])
+c.get("zero(1000,1.0)")
+ms = []
+for _ in range(5):
+    t = time.time(); c.get("zero(2000000,1.0)"); ms.append(1000 * (time.time() - t))
+ms.sort()
+print("8 MB replies, ms:", [round(x) for x in ms])
+sys.exit(0 if ms[2] < 100 else 1)
+PYEOF
+
   echo "--- 7. transport lifecycle and error paths ---"
   # mdsip -m forks a process per connection, so a leaked relay session is a
   # leaked mdsip process. Counting them is the only check here that would
@@ -167,7 +219,15 @@ else
       # One process per connection, so no -m in the pattern. Matching the old
       # "mdsip -m -p" here would find nothing at all, and a counter stuck at 0
       # reports "no leak" for every possible outcome.
-      pgrep -c -f "mdsip -p $MDSIP_PORT" 2>/dev/null || echo 0
+      # In socket mode the relay's sessions land on the Unix-served mdsip,
+      # whose -p is the nominal 8000, so count those instead.
+      if [ -n "$SOCKET" ]; then
+        n="$(pgrep -c -f "mdsip -p 8000 -h $WORK/mdsip.hosts" 2>/dev/null)" || true
+        echo "${n:-0}"
+      else
+        n="$(pgrep -c -f "mdsip -p $MDSIP_PORT" 2>/dev/null)" || true
+        echo "${n:-0}"
+      fi
     fi
   }
 

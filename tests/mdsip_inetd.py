@@ -10,6 +10,11 @@ shots. A test server that behaves differently from the deployed one is worse
 than no test server, because it makes the difference invisible.
 
     python tests/mdsip_inetd.py <port> <hostfile>
+    python tests/mdsip_inetd.py </path/to.sock> <hostfile>
+
+The second form listens on a Unix socket, as the sandbox does in production
+(FDP_MDSIP_SOCKET in scripts/fdp-mdsip-server). mdsip serves an AF_UNIX peer on
+fd 0 just as it serves a TCP one; its -p port is then only nominal.
 """
 
 import os
@@ -21,16 +26,34 @@ MDSPLUS_BIN = os.environ.get("MDSIP_BIN", "mdsip")
 
 
 def main():
-    port, hostfile = int(sys.argv[1]), sys.argv[2]
+    target, hostfile = sys.argv[1], sys.argv[2]
 
     # Reap children automatically; nothing here waits on them.
     signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", port))
+    if target.startswith("/"):
+        # A stale socket file from an earlier run would make bind fail with
+        # EADDRINUSE, as socat's unlink-early avoids in the image.
+        try:
+            os.unlink(target)
+        except FileNotFoundError:
+            pass
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(target)
+        # Same reachability as the image's mode=666.
+        os.chmod(target, 0o666)
+        port = 8000                     # nominal: mdsip never binds it here
+        where = target
+    else:
+        if not target.isdigit():
+            sys.exit("first argument must be a TCP port or an absolute socket path")
+        port = int(target)
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", port))
+        where = str(port)
     srv.listen(128)
-    print("mdsip_inetd listening on %d" % port, flush=True)
+    print("mdsip_inetd listening on %s" % where, flush=True)
 
     while True:
         conn, _ = srv.accept()
