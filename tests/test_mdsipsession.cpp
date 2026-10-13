@@ -422,3 +422,14 @@ TEST_CASE("a Unix target with no socket behind it fails to open, naming the path
     CHECK(token.empty());
     CHECK(error.find("cannot connect to mdsip at " + path) != std::string::npos);
 }
+
+TEST_CASE("a Unix socket path that cannot fit sun_path is refused, not truncated") {
+    fdp::MdsipTarget target;
+    target.socket_path = "/" + std::string(200, 'x') + ".sock";
+    fdp::MdsipSessions sessions(target, 300, 0, 5000);
+
+    std::string error;
+    const std::string token = sessions.Open(error);
+    CHECK(token.empty());
+    CHECK(error.find("mdsip socket path too long") != std::string::npos);
+}

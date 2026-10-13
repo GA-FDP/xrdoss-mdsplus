@@ -27,7 +27,7 @@ bool ResolveMdsipTarget(const std::string &host_parm,
                         const std::string &socket_parm,
                         MdsipTarget &out, std::string &error);
 
-// Holds one mdsip TCP connection per client session.
+// Holds one mdsip connection (TCP or Unix socket) per client session.
 //
 // This exists because mdsip is STATEFUL: openTree sets the tree context on the
 // connection. A relay that opened a fresh mdsip connection per HTTP request
