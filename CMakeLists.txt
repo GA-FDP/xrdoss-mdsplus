@@ -53,10 +53,10 @@ endif()
 # third_party/mdsplus/README.md.
 set(MDSPLUS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mdsplus)
 if(NEED_MDSPLUS)
-    find_path(MDSPLUS_LIB_DIR NAMES libMdsIpShr.so
+    find_path(MDSPLUS_LIB_DIR NAMES libMdsIpShr${CMAKE_SHARED_LIBRARY_SUFFIX}
         HINTS ${CMAKE_PREFIX_PATH}/lib $ENV{PREFIX}/lib $ENV{CONDA_PREFIX}/lib)
     if(NOT MDSPLUS_LIB_DIR)
-        message(FATAL_ERROR "libMdsIpShr.so not found")
+        message(FATAL_ERROR "libMdsIpShr${CMAKE_SHARED_LIBRARY_SUFFIX} not found")
     endif()
     message(STATUS "MDSplus includes: ${MDSPLUS_INCLUDE_DIR}")
     message(STATUS "MDSplus libs:     ${MDSPLUS_LIB_DIR}")
