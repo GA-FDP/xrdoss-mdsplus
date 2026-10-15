@@ -10,7 +10,12 @@ mdsplus_impl:
 
 # Match the rest of the FDP stack: built against a glibc old enough for the
 # RHEL 8 machines these run on.
+# macOS 11 is the first release for Apple Silicon.
 c_stdlib:
-  - sysroot
+  - sysroot # [linux]
+  - macosx_deployment_target # [osx]
 c_stdlib_version:
-  - "2.28"
+  - "2.28" # [linux]
+  - "11.0" # [osx]
+MACOSX_DEPLOYMENT_TARGET: # [osx]
+  - "11.0" # [osx]

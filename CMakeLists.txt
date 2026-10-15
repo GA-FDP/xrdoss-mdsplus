@@ -225,6 +225,11 @@ if(BUILD_CLIENT)
     # dependency explicit rather than relying on the loader's global scope.
     target_link_libraries(MdsIpFDP CURL::libcurl MdsIpShr)
     set_target_properties(MdsIpFDP PROPERTIES PREFIX "lib" OUTPUT_NAME "MdsIpFDP")
+    # MDSplus appends its shared-library suffix, .dylib on macOS, where CMake
+    # would give a MODULE .so.
+    if(APPLE)
+        set_target_properties(MdsIpFDP PROPERTIES SUFFIX ".dylib")
+    endif()
     list(APPEND INSTALL_TARGETS MdsIpFDP)
 endif()
 
