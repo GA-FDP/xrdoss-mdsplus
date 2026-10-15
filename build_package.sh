@@ -6,7 +6,12 @@
 # The version comes from git, versioneer-style, so a package is always traceable
 # to a commit:
 #
-#   on a release- tag        0.1.0
+#   on a staging-/release- tag 0.1.0
+#
+# Both prefixes name the same version: staging-X.Y.Z builds and uploads to
+# ga-fdp/label/staging, and release-X.Y.Z (cut by the fdp-core bless) relabels
+# those bytes to main. Tags up to 0.3.5 are release-* only.
+#
 #   3 commits past one       0.1.0+3.g1a2b3c4
 #   with uncommitted changes 0.1.0+3.g1a2b3c4.dirty
 #   no tags at all           0.0.0+g1a2b3c4
@@ -22,8 +27,8 @@ git rev-parse --git-dir >/dev/null 2>&1 \
 # --dirty is deliberate. A package built from a modified tree is not the tag it
 # claims, and finding that out from the version string beats finding it out from
 # behaviour.
-if describe="$(git describe --tags --long --dirty --match 'release-*' 2>/dev/null)"; then
-    # release-0.1.0-3-g1a2b3c4[-dirty]
+if describe="$(git describe --tags --long --dirty --match 'staging-*' --match 'release-*' 2>/dev/null)"; then
+    # staging-0.1.0-3-g1a2b3c4[-dirty]
     dirty=""
     case "$describe" in *-dirty) dirty=".dirty"; describe="${describe%-dirty}";; esac
     sha="${describe##*-g}"
@@ -31,6 +36,7 @@ if describe="$(git describe --tags --long --dirty --match 'release-*' 2>/dev/nul
     distance="${rest##*-}"
     tag="${rest%-*}"
     tag="${tag#release-}"
+    tag="${tag#staging-}"
     if [ "$distance" = 0 ] && [ -z "$dirty" ]; then
         PKG_VERSION="$tag"
     else
@@ -51,7 +57,13 @@ mkdir -p "$OUTPUT_DIR"
 
 echo "building version ${PKG_VERSION} -> ${OUTPUT_DIR}"
 
+# Siblings (mdsplus-xrdcl) live in ga-fdp/label/staging until a bless
+# promotes them, so CI adds that channel.
+CHANNEL_FLAGS="--channel ga-fdp --channel conda-forge"
+if [ -n "${EXTRA_CHANNEL:-}" ]; then
+    CHANNEL_FLAGS="--channel ${EXTRA_CHANNEL} ${CHANNEL_FLAGS} --channel-priority disabled"
+fi
+
 rattler-build build --recipe recipe/ \
-  --channel ga-fdp \
-  --channel conda-forge \
+  ${CHANNEL_FLAGS} \
   --output-dir "$OUTPUT_DIR"

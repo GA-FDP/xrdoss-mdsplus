@@ -57,8 +57,13 @@ outputs:
             # The name is load-bearing. MDSplus's LoadIo() builds the image name
             # from the URL scheme -- "MdsIp" + "FDP" -- so a version suffix, the
             # convention for the XRootD plugin below, would make it unloadable.
-            - test -f $PREFIX/lib/libMdsIpFDP.so
-            - test ! -e $PREFIX/lib/libMdsIpFDP-5.so
+            - if: linux
+              then:
+                - test -f $PREFIX/lib/libMdsIpFDP.so
+                - test ! -e $PREFIX/lib/libMdsIpFDP-5.so
+              else:
+                - test -f $PREFIX/lib/libMdsIpFDP.dylib
+                - test ! -e $PREFIX/lib/libMdsIpFDP-5.dylib
             # The modern PTDATA2/PTHEAD2, which replace the site versions on
             # MDS_PATH. Asserted by name: a glob that matched nothing would
             # install zero files and the package would still build, leaving
@@ -72,8 +77,13 @@ outputs:
             # The light-install claim: MDSplus and curl, no XRootD. Match on
             # NEEDED entries rather than ldd output, whose resolved paths
             # contain the package name and match almost any pattern.
-            - readelf -d $PREFIX/lib/libMdsIpFDP.so | grep NEEDED
-            - "! readelf -d $PREFIX/lib/libMdsIpFDP.so | grep NEEDED | grep -qE 'libXrd'"
+            - if: linux
+              then:
+                - readelf -d $PREFIX/lib/libMdsIpFDP.so | grep NEEDED
+                - "! readelf -d $PREFIX/lib/libMdsIpFDP.so | grep NEEDED | grep -qE 'libXrd'"
+              else:
+                - otool -L $PREFIX/lib/libMdsIpFDP.dylib
+                - "! otool -L $PREFIX/lib/libMdsIpFDP.dylib | grep -qE 'libXrd'"
             - python test_transport.py
           env:
             # Empty when the secret is unavailable (forks, offline builds), in
@@ -83,7 +93,8 @@ outputs:
         requirements:
           run:
             - python
-            - binutils
+            - if: linux
+              then: binutils
             - ${{ mdsplus_impl }}
         files:
           recipe:
@@ -115,6 +126,9 @@ outputs:
       name: xrdhttp-mdsip
 
     build:
+      # Origin-side only, and origins run Linux.
+      skip:
+        - osx
       number: 0
       script: build-relay.sh
 

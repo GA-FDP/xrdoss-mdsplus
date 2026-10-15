@@ -29,11 +29,12 @@ TREE, SHOT, SIGNAL = "efit01", 198873, r"\ipmhd"
 def reexec_without_library_path():
     """Re-run this script with the loader's search-path variables removed.
 
-    glibc reads LD_LIBRARY_PATH once at process start, so clearing it in
+    glibc and dyld read their search paths once at process start, so clearing it in
     os.environ would not affect any later dlopen. It has to be a new process.
     """
     env = dict(os.environ)
-    for var in ("LD_LIBRARY_PATH", "MDSPLUS_LIBRARY_PATH", "MDSPLUS_DIR"):
+    for var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
+                "MDSPLUS_LIBRARY_PATH", "MDSPLUS_DIR"):
         env.pop(var, None)
     env[SCRUBBED] = "1"
     os.execve(sys.executable, [sys.executable, os.path.abspath(__file__)], env)

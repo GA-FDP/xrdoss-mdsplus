@@ -1,10 +1,20 @@
 name: Conda Package CI/CD
 
+# Two events, one version. See
+# fdp-core/docs/specs/2026-09-15-staging-and-promotion.md section 3.
+#
+#   staging-X.Y.Z  -> build, upload to ga-fdp/label/staging
+#   release-X.Y.Z  -> relabel those exact bytes to main. NO rebuild.
+#
+# The release tag is cut by the fdp-core bless (tools/promote_members.py),
+# not by hand. It performs no build on purpose: promotion must ship the bytes
+# that were verified, and a rebuild would not.
 on:
   push:
     branches:
       - main
     tags:
+      - 'staging-*'
       - 'release-*'
   pull_request:
     branches:
@@ -15,6 +25,7 @@ jobs:
   # would ever run the unit tests -- including the call-framing tests, which
   # cover the transport's most failure-prone logic.
   test:
+    if: "!startsWith(github.ref, 'refs/tags/release-')"
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -30,8 +41,20 @@ jobs:
         run: pixi run test
 
   build_and_test:
-    runs-on: ubuntu-latest
+    if: "!startsWith(github.ref, 'refs/tags/release-')"
     needs: test
+    # osx-arm64 builds natively on macOS: a cross-build from Linux would need
+    # Apple's SDK, whose license limits it to Apple hardware. Only mdsip-fdp
+    # builds there; the relay is origin-side and skips osx.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - subdir: linux-64
+            os: ubuntu-latest
+          - subdir: osx-arm64
+            os: macos-14
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash -el {0}
@@ -55,15 +78,84 @@ jobs:
           # resolution half, which is what packaging can actually break, still
           # runs.
           BEARER_TOKEN: ${{ secrets.BEARER_TOKEN }}
+          # mdsplus-xrdcl lives in staging until a bless promotes it.
+          EXTRA_CHANNEL: ga-fdp/label/staging
         run: |
           pixi global install rattler-build
           ./build_package.sh "${HOME}/outdir"
 
-      - name: Upload to Anaconda
-        if: startsWith(github.ref, 'refs/tags/release-')
+      - name: The built version must match the tag
+        # The version comes from `git describe`, which picks ONE tag when a
+        # commit carries several. Without this, a second staging tag on the
+        # same commit uploads the EARLIER version under the newer tag.
+        if: startsWith(github.ref, 'refs/tags/staging-')
         run: |
-          rattler-build upload anaconda \
-            --owner ga-fdp \
-            --api-key ${{ secrets.ANACONDA_API_TOKEN }} \
-            --force \
-            "${HOME}"/outdir/linux-64/*.conda
+          VERSION="${GITHUB_REF#refs/tags/staging-}"
+          shopt -s nullglob
+          built=(${HOME}/outdir/*/*-${VERSION}-*.conda)
+          if [ ${#built[@]} -eq 0 ]; then
+            echo "::error::tag says ${VERSION}, but nothing of that version was built."
+            echo "::error::Usually: this commit carries another staging- tag and"
+            echo "::error::git describe chose it. Tag a fresh commit."
+            ls -la ${HOME}/outdir/*/ || true
+            exit 1
+          fi
+          printf 'ARTIFACTS<<EOF\n%s\nEOF\n' "$(printf '%s\n' "${built[@]}")" >> $GITHUB_ENV
+          echo "version ${VERSION}: ${#built[@]} artifact(s)"
+
+      - name: Upload to staging
+        if: startsWith(github.ref, 'refs/tags/staging-')
+        run: |
+          # Always staging. Promotion is a separate event on the release tag.
+          echo "$ARTIFACTS" | while read -r f; do
+            [ -n "$f" ] && rattler-build upload anaconda \
+              --owner ga-fdp \
+              --channel staging \
+              --api-key ${{ secrets.ANACONDA_API_TOKEN }} \
+              --force \
+              "$f"
+          done
+
+      - name: Retire the superseded staging candidates
+        # AFTER the upload, never before. DELETES NOTHING: the old candidate
+        # is downloaded, checksum-verified and moved to the `attic` label.
+        # Once per version, from the linux leg; the macOS leg uploads alongside.
+        if: startsWith(github.ref, 'refs/tags/staging-') && matrix.subdir == 'linux-64'
+        env:
+          ANACONDA_API_TOKEN: ${{ secrets.ANACONDA_API_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/staging-}"
+          for pkg in mdsip-fdp xrdhttp-mdsip; do
+            python .github/scripts/channel_tools.py retire \
+              "${pkg}" "${VERSION}" "${RUNNER_TEMP}/attic"
+          done
+
+      - name: Keep the retired bytes off-channel
+        if: always() && startsWith(github.ref, 'refs/tags/staging-') && matrix.subdir == 'linux-64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: retired-staging-candidates
+          path: ${{ runner.temp }}/attic
+          if-no-files-found: ignore
+          retention-days: 90
+
+  promote:
+    # No build. Relabels the artifacts that were already built and verified.
+    if: startsWith(github.ref, 'refs/tags/release-')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    env:
+      ANACONDA_API_TOKEN: ${{ secrets.ANACONDA_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Move staging -> main
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/release-}"
+          # NOT `anaconda move`: it ignores the version and moves everything
+          # in the source label. See fdp-core spec section 4.2.
+          for pkg in mdsip-fdp xrdhttp-mdsip; do
+            python .github/scripts/channel_tools.py promote "${pkg}" "${VERSION}"
+          done
